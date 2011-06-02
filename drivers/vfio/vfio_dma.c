@@ -100,21 +100,74 @@ static void vfio_lock_acct(int npage)
 	schedule_work(&vwork->work);
 }
 
+/* Some mappings aren't backed by a struct page, for example an mmap'd
+ * MMIO range for our own or another device.  These use a different
+ * pfn conversion and shouldn't be tracked as locked pages. */
+static int is_invalid_reserved_pfn(unsigned long pfn)
+{
+	if (pfn_valid(pfn)) {
+		int reserved;
+		struct page *tail = pfn_to_page(pfn);
+		struct page *head = compound_trans_head(tail);
+		reserved = PageReserved(head);
+		if (head != tail) {
+			/* "head" is not a dangling pointer
+			 * (compound_trans_head takes care of that)
+			 * but the hugepage may have been split
+			 * from under us (and we may not hold a
+			 * reference count on the head page so it can
+			 * be reused before we run PageReferenced), so
+			 * we've to check PageTail before returning
+			 * what we just read.
+			 */
+			smp_rmb();
+			if (PageTail(tail))
+				return reserved;
+		}
+		return PageReserved(tail);
+	}
+
+	return true;
+}
+
+static int put_pfn(unsigned long pfn, int rdwr)
+{
+	if (!is_invalid_reserved_pfn(pfn)) {
+		struct page *page = pfn_to_page(pfn);
+		if (rdwr)
+			SetPageDirty(page);
+		put_page(page);
+		return 1;
+	}
+	return 0;
+}
+
 /* Unmap DMA region */
 /* dgate must be held */
-static void vfio_dma_unmap(struct vfio_uiommu *uiommu, unsigned long iova,
-			   int npage, struct page **pages, int rdwr)
+static int __vfio_dma_unmap(struct vfio_uiommu *uiommu, unsigned long iova,
+			    int npage, int rdwr)
 {
-	int i;
+	int i, unlocked = 0;
 
 	for (i = 0; i < npage; i++, iova += PAGE_SIZE) {
+		unsigned long pfn;
+
+		pfn = uiommu_iova_to_phys(uiommu->udomain, iova) >> PAGE_SHIFT;
 		uiommu_unmap(uiommu->udomain, iova, 0);
-		if (rdwr)
-			SetPageDirty(pages[i]);
-		put_page(pages[i]);
+
+		unlocked += put_pfn(pfn, rdwr);
 	}
-	uiommu->locked_pages -= npage;
-	vfio_lock_acct(-npage);
+	return unlocked;
+}
+
+static void vfio_dma_unmap(struct vfio_uiommu *uiommu, unsigned long iova,
+			   unsigned long npage, int rdwr)
+{
+	int unlocked;
+
+	unlocked = __vfio_dma_unmap(uiommu, iova, npage, rdwr);
+	uiommu->locked_pages -= unlocked;
+	vfio_lock_acct(-unlocked);
 }
 
 /* Unmap ALL DMA regions */
@@ -126,41 +179,83 @@ static void vfio_dma_unmapall(struct vfio_uiommu *uiommu)
 	mutex_lock(&uiommu->dgate);
 	list_for_each_safe(pos, pos2, &uiommu->dm_list) {
 		mlp = list_entry(pos, struct dma_map_page, list);
-		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage,
-			       mlp->pages, mlp->rdwr);
+		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage, mlp->rdwr);
 		list_del(&mlp->list);
-		vfree(mlp->pages);
 		kfree(mlp);
 	}
 	mutex_unlock(&uiommu->dgate);
 }
 
+static int vaddr_get_pfn(unsigned long vaddr, int rdwr, unsigned long *pfn)
+{
+	struct page *page[1];
+	struct vm_area_struct *vma;
+	int ret = -EFAULT;
+
+	if (get_user_pages_fast(vaddr, 1, rdwr, page) == 1) {
+		*pfn = page_to_pfn(page[0]);
+		return 0;
+	}
+
+	down_read(&current->mm->mmap_sem);
+
+	vma = find_vma_intersection(current->mm, vaddr, vaddr + 1);
+
+	if (vma && vma->vm_flags & VM_PFNMAP) {
+		*pfn = ((vaddr - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+		if (is_invalid_reserved_pfn(*pfn))
+			ret = 0;
+	}
+
+	up_read(&current->mm->mmap_sem);
+
+	return ret;
+}
+
 /* Map DMA region */
 /* dgate must be held */
 static int vfio_dma_map(struct vfio_uiommu *uiommu, unsigned long iova,
-			int npage, struct page **pages, int rdwr)
+			unsigned long vaddr, int npage, int rdwr)
 {
 	unsigned long start = iova;
-	int i, ret;
+	int i, ret, locked = 0, prot = IOMMU_READ;
 
 	/* Verify pages are not already mapped */
 	for (i = 0; i < npage; i++, iova += PAGE_SIZE)
 		if (uiommu_iova_to_phys(uiommu->udomain, iova))
 			return -EBUSY;
 
-	for (iova = start, i = 0; i < npage; i++, iova += PAGE_SIZE) {
-		ret = uiommu_map(uiommu->udomain, iova,
-				 page_to_phys(pages[i]), 0, rdwr);
-		if (!ret)
-			continue;
+	iova = start;
 
-		/* Back out mappings on error */
-		for (i--, iova -= PAGE_SIZE; i >= 0; i--, iova -= PAGE_SIZE)
-			uiommu_unmap(uiommu->udomain, iova, 0);
-		return ret;
+	if (rdwr)
+		prot |= IOMMU_WRITE;
+	if (uiommu->cachec)
+		prot |= IOMMU_CACHE;
+
+	for (i = 0; i < npage; i++, iova += PAGE_SIZE, vaddr += PAGE_SIZE) {
+		unsigned long pfn;
+
+		ret = vaddr_get_pfn(vaddr, rdwr, &pfn);
+		if (ret) {
+			__vfio_dma_unmap(uiommu, start, i, rdwr);
+			return ret;
+		}
+
+		/* Only add actual locked pages to accounting */
+		if (!is_invalid_reserved_pfn(pfn))
+			locked++;
+
+		ret = uiommu_map(uiommu->udomain, iova,
+				 pfn << PAGE_SHIFT, 0, prot);
+		if (ret) {
+			/* Back out mappings on error */
+			put_pfn(pfn, rdwr);
+			__vfio_dma_unmap(uiommu, start, i, rdwr);
+			return ret;
+		}
 	}
-	uiommu->locked_pages += npage;
-	vfio_lock_acct(npage);
+	uiommu->locked_pages += locked;
+	vfio_lock_acct(locked);
 	return 0;
 }
 
@@ -199,16 +294,13 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 			    size_t *remaining)
 {
 	struct dma_map_page *split;
-	struct page **pages_lo, **pages_hi;
 	int npage_lo, npage_hi;
 
 	/* Existing dma region is completely covered, unmap all */
 	if (start <= mlp->daddr &&
 	    start + size >= mlp->daddr + NPAGE_TO_SIZE(mlp->npage)) {
-		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage,
-			       mlp->pages, mlp->rdwr);
+		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage, mlp->rdwr);
 		list_del(&mlp->list);
-		vfree(mlp->pages);
 		if (remaining)
 			*remaining -= NPAGE_TO_SIZE(mlp->npage);
 		kfree(mlp);
@@ -223,19 +315,10 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 		npage_lo = overlap >> PAGE_SHIFT;
 		npage_hi = mlp->npage - npage_lo;
 
-		pages_hi = vmalloc(npage_hi * sizeof(struct page *));
-		if (!pages_hi)
-			return -ENOMEM;
-
-		vfio_dma_unmap(uiommu, mlp->daddr, npage_lo,
-			       mlp->pages, mlp->rdwr);
+		vfio_dma_unmap(uiommu, mlp->daddr, npage_lo, mlp->rdwr);
 		mlp->daddr += overlap;
 		mlp->vaddr += overlap;
 		mlp->npage -= npage_lo;
-		memcpy(pages_hi, &mlp->pages[npage_lo],
-		       mlp->npage * sizeof(struct page *));
-		vfree(mlp->pages);
-		mlp->pages = pages_hi;
 		if (remaining)
 			*remaining -= overlap;
 		return 0;
@@ -249,17 +332,8 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 		npage_hi = overlap >> PAGE_SHIFT;
 		npage_lo = mlp->npage - npage_hi;
 
-		pages_lo = vmalloc(npage_lo * sizeof(struct page *));
-		if (!pages_lo)
-			return -ENOMEM;
-
-		vfio_dma_unmap(uiommu, start, npage_hi,
-			       &mlp->pages[npage_lo], mlp->rdwr);
+		vfio_dma_unmap(uiommu, start, npage_hi, mlp->rdwr);
 		mlp->npage -= npage_hi;
-		memcpy(pages_lo, mlp->pages,
-		       mlp->npage * sizeof(struct page *));
-		vfree(mlp->pages);
-		mlp->pages = pages_lo;
 		if (remaining)
 			*remaining -= overlap;
 		return 0;
@@ -273,32 +347,11 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 	if (!split)
 		return -ENOMEM;
 
-	pages_lo = vmalloc(npage_lo * sizeof(struct page *));
-	if (!pages_lo) {
-		kfree(split);
-		return -ENOMEM;
-	}
+	vfio_dma_unmap(uiommu, start, size >> PAGE_SHIFT, mlp->rdwr);
 
-	pages_hi = vmalloc(npage_hi * sizeof(struct page *));
-	if (!pages_hi) {
-		kfree(split);
-		vfree(pages_lo);
-		return -ENOMEM;
-	}
-
-	vfio_dma_unmap(uiommu, start, size >> PAGE_SHIFT,
-		       &mlp->pages[npage_lo], mlp->rdwr);
-
-	memcpy(pages_lo, mlp->pages, npage_lo * sizeof(struct page *));
-	memcpy(pages_hi, &mlp->pages[npage_lo + (size >> PAGE_SHIFT)],
-	       npage_hi * sizeof(struct page *));
-
-	vfree(mlp->pages);
 	mlp->npage = npage_lo;
-	mlp->pages = pages_lo;
 
 	split->npage = npage_hi;
-	split->pages = pages_hi;
 	split->daddr = start + size;
 	split->vaddr = mlp->vaddr + NPAGE_TO_SIZE(npage_lo) + size;
 	split->rdwr = mlp->rdwr;
@@ -392,13 +445,11 @@ static const struct mmu_notifier_ops vfio_dma_mmu_notifier_ops = {
 int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 {
 	int npage, locked, lock_limit;
-	struct page **pages;
-	struct dma_map_page *mlp, *nmlp, *mmlp = NULL;
-	int rdwr = IOMMU_READ;
+	struct dma_map_page *mlp, *mmlp = NULL;
 	dma_addr_t daddr = dmp->dmaaddr;
 	unsigned long vaddr = dmp->vaddr;
 	size_t size = dmp->size;
-	int ret = 0;
+	int ret = 0, rdwr = dmp->flags & VFIO_FLAG_WRITE;
 
 	if (vaddr & (PAGE_SIZE-1))
 		return -EINVAL;
@@ -413,11 +464,6 @@ int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 
 	if (!uiommu)
 		return -EINVAL;
-
-	if (dmp->flags & VFIO_FLAG_WRITE)
-		rdwr |= IOMMU_WRITE;
-	if (uiommu->cachec)
-		rdwr |= IOMMU_CACHE;
 
 	mutex_lock(&uiommu->dgate);
 
@@ -436,70 +482,21 @@ int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 		goto out_lock;
 	}
 
-	/* Allocate a new mlp, this may not be used if we merge, but
-	 * ENOMEM is easier to handle before we do the iova mapping */
-	nmlp = kzalloc(sizeof *nmlp, GFP_KERNEL);
-	if (!nmlp) {
-		ret = -ENOMEM;
+	ret = vfio_dma_map(uiommu, daddr, vaddr, npage, rdwr);
+	if (ret)
 		goto out_lock;
-	}
-
-	pages = vmalloc(npage * sizeof(struct page *));
-	if (!pages) {
-		kfree(nmlp);
-		ret = -ENOMEM;
-		goto out_lock;
-	}
-
-	ret = get_user_pages_fast(vaddr, npage, rdwr & IOMMU_WRITE, pages);
-	if (ret != npage) {
-		kfree(nmlp);
-		vfree(pages);
-		if (ret >= 0) {
-			while (ret)
-				put_page(pages[--ret]);
-			ret = -EAGAIN;
-		}
-		goto out_lock;
-	}
-
-	ret = vfio_dma_map(uiommu, daddr, npage, pages, rdwr);
-	if (ret) {
-		while (npage--)
-			put_page(pages[npage]);
-		kfree(nmlp);
-		vfree(pages);
-		goto out_lock;
-	}
 
 	/* Check if we abut a region below */
 	if (daddr) {
 		mlp = vfio_find_dma(uiommu, daddr - 1, 1);
 		if (mlp && mlp->rdwr == rdwr &&
 		    mlp->vaddr + NPAGE_TO_SIZE(mlp->npage) == vaddr) {
-			struct page **mpages;
 
-			mpages = vmalloc((mlp->npage + npage) *
-					 sizeof(struct page *));
-			if (!mpages)
-				goto no_merge;
-
-			memcpy(mpages, mlp->pages,
-			       mlp->npage * sizeof(struct page *));
-			memcpy(&mpages[mlp->npage], pages,
-			       npage * sizeof(struct page *));
-
-			vfree(mlp->pages);
-			vfree(pages);
-
-			mlp->pages = mpages;
 			mlp->npage += npage;
-
 			daddr = mlp->daddr;
 			vaddr = mlp->vaddr;
 			npage = mlp->npage;
 			size = NPAGE_TO_SIZE(npage);
-			pages = mlp->pages;
 
 			mmlp = mlp;
 		}
@@ -508,26 +505,13 @@ int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 	if (daddr + size) {
 		mlp = vfio_find_dma(uiommu, daddr + size, 1);
 		if (mlp && mlp->rdwr == rdwr && mlp->vaddr == vaddr + size) {
-			struct page **mpages;
 
-			mpages = vmalloc((mlp->npage + npage) *
-					 sizeof(struct page *));
-			if (!mpages)
-				goto no_merge;
-
-			memcpy(mpages, pages,
-			       npage * sizeof(struct page *));
-			memcpy(&mpages[npage], mlp->pages,
-			       mlp->npage * sizeof(struct page *));
-
-			vfree(mlp->pages);
-			vfree(pages);
-
-			mlp->pages = mpages;
 			mlp->npage += npage;
 			mlp->daddr = daddr;
 			mlp->vaddr = vaddr;
 
+			/* If merged above and below, remove previously
+			 * merged entry.  New entry covers it.  */
 			if (mmlp) {
 				list_del(&mmlp->list);
 				kfree(mmlp);
@@ -536,16 +520,20 @@ int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 		}
 	}
 
-no_merge:
 	if (!mmlp) {
-		nmlp->pages = pages;
-		nmlp->npage = npage;
-		nmlp->daddr = daddr;
-		nmlp->vaddr = vaddr;
-		nmlp->rdwr = rdwr;
-		list_add(&nmlp->list, &uiommu->dm_list);
-	} else
-		kfree(nmlp);
+		mlp = kzalloc(sizeof *mlp, GFP_KERNEL);
+		if (!mlp) {
+			ret = -ENOMEM;
+			vfio_dma_unmap(uiommu, daddr, npage, rdwr);
+			goto out_lock;
+		}
+
+		mlp->npage = npage;
+		mlp->daddr = daddr;
+		mlp->vaddr = vaddr;
+		mlp->rdwr = rdwr;
+		list_add(&mlp->list, &uiommu->dm_list);
+	}
 
 out_lock:
 	mutex_unlock(&uiommu->dgate);

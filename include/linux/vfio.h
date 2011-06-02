@@ -99,7 +99,6 @@ struct vfio_dev {
  */
 struct dma_map_page {
 	struct list_head list;
-	struct page     **pages;
 	dma_addr_t      daddr;
 	unsigned long	vaddr;
 	int		npage;
