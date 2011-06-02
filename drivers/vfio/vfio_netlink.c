@@ -35,7 +35,6 @@
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <net/genetlink.h>
-#include <linux/mmu_notifier.h>
 #include <linux/vfio.h>
 
 static u32 vfio_seq_num;

@@ -48,7 +48,6 @@ struct vfio_uiommu {
 	struct list_head	dm_list;
 	u32			locked_pages;
 	struct mm_struct	*mm;
-	struct mmu_notifier	mmu_notifier;
 	struct list_head	next;
 	int			refcnt;
 	int			cachec;

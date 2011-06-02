@@ -41,7 +41,6 @@
 #include <linux/eventfd.h>
 #include <linux/pci.h>
 #include <linux/iommu.h>
-#include <linux/mmu_notifier.h>
 #include <linux/uaccess.h>
 #include <linux/suspend.h>
 #include <linux/compat.h>

@@ -35,7 +35,6 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/mm.h>
-#include <linux/mmu_notifier.h>
 #include <linux/iommu.h>
 #include <linux/uiommu.h>
 #include <linux/sched.h>
@@ -378,68 +377,6 @@ int vfio_dma_unmap_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 	return ret > 0 ? 0 : ret;
 }
 
-#ifdef CONFIG_MMU_NOTIFIER
-/* Handle MMU notifications - user process freed or realloced memory
- * which may be in use in a DMA region. Clean up region if so.
- */
-static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
-				       unsigned long start, unsigned long end)
-{
-	struct vfio_uiommu *uiommu;
-	struct list_head *pos, *n;
-	size_t size = end - start;
-
-	uiommu = container_of(mn, struct vfio_uiommu, mmu_notifier);
-	mutex_lock(&uiommu->dgate);
-
-	/* vaddrs are not unique (multiple daddrs could be mapped to the
-	 * same vaddr), therefore we have to search to exhaustion rather
-	 * than tracking how much we've unmapped. */
-	list_for_each_safe(pos, n, &uiommu->dm_list) {
-		struct dma_map_page *mlp;
-		dma_addr_t dma_start;
-		int ret;
-
-		mlp = list_entry(pos, struct dma_map_page, list);
-
-		if (!ranges_overlap(mlp->vaddr, NPAGE_TO_SIZE(mlp->npage),
-				    start, size))
-			continue;
-
-		dma_start = mlp->daddr;
-		if (start < mlp->vaddr)
-			dma_start -= mlp->vaddr - start;
-		else
-			dma_start += start - mlp->vaddr;
-		ret = vfio_remove_dma_overlap(uiommu, dma_start, size, mlp);
-		if (ret < 0) {
-			printk(KERN_ERR "%s: "
-			       "failed to unmap mmu notify range "
-			       "%lx - %lx (%d)\n", __func__, start, end, ret);
-			break;
-		}
-	}
-	mutex_unlock(&uiommu->dgate);
-}
-
-static void vfio_dma_inval_page(struct mmu_notifier *mn,
-		struct mm_struct *mm, unsigned long addr)
-{
-	vfio_dma_handle_mmu_notify(mn, addr, addr + PAGE_SIZE);
-}
-
-static void vfio_dma_inval_range_start(struct mmu_notifier *mn,
-		struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	vfio_dma_handle_mmu_notify(mn, start, end);
-}
-
-static const struct mmu_notifier_ops vfio_dma_mmu_notifier_ops = {
-	.invalidate_page = vfio_dma_inval_page,
-	.invalidate_range_start = vfio_dma_inval_range_start,
-};
-#endif	/* CONFIG_MMU_NOTIFIER */
-
 int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 {
 	int npage, locked, lock_limit;
@@ -550,10 +487,6 @@ int vfio_domain_unset(struct vfio_dev *vdev)
 
 	mutex_lock(&vfio_uiommu_lock);
 	if (--vdev->uiommu->refcnt == 0) {
-#ifdef CONFIG_MMU_NOTIFIER
-		mmu_notifier_unregister(&vdev->uiommu->mmu_notifier,
-					vdev->uiommu->mm);
-#endif
 		vfio_dma_unmapall(vdev->uiommu);
 		list_del(&vdev->uiommu->next);
 		kfree(vdev->uiommu);
@@ -620,14 +553,6 @@ int vfio_domain_set(struct vfio_dev *vdev, int fd, int unsafe_ok)
 		uiommu->udomain = udomain;
 		uiommu->cachec = cachec;
 		uiommu->mm = current->mm;
-#ifdef CONFIG_MMU_NOTIFIER
-		uiommu->mmu_notifier.ops = &vfio_dma_mmu_notifier_ops;
-		ret = mmu_notifier_register(&uiommu->mmu_notifier, uiommu->mm);
-		if (ret)
-			printk(KERN_ERR "%s: mmu_notifier_register failed %d\n",
-				__func__, ret);
-		ret = 0;
-#endif
 		INIT_LIST_HEAD(&uiommu->dm_list);
 		mutex_init(&uiommu->dgate);
 		list_add(&uiommu->next, &vfio_uiommu_list);
