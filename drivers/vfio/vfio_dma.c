@@ -44,6 +44,9 @@
 
 #define NPAGE_TO_SIZE(npage)	((size_t)(npage) << PAGE_SHIFT)
 
+static LIST_HEAD(vfio_uiommu_list);
+static DEFINE_MUTEX(vfio_uiommu_lock);
+
 struct vwork {
 	struct mm_struct *mm;
 	int		npage;
@@ -99,77 +102,75 @@ static void vfio_lock_acct(int npage)
 
 /* Unmap DMA region */
 /* dgate must be held */
-static void vfio_dma_unmap(struct vfio_listener *listener, unsigned long iova,
+static void vfio_dma_unmap(struct vfio_uiommu *uiommu, unsigned long iova,
 			   int npage, struct page **pages, int rdwr)
 {
-	struct vfio_dev *vdev = listener->vdev;
 	int i;
 
 	for (i = 0; i < npage; i++, iova += PAGE_SIZE) {
-		uiommu_unmap(vdev->udomain, iova, 0);
+		uiommu_unmap(uiommu->udomain, iova, 0);
 		if (rdwr)
 			SetPageDirty(pages[i]);
 		put_page(pages[i]);
 	}
-	vdev->locked_pages -= npage;
+	uiommu->locked_pages -= npage;
 	vfio_lock_acct(-npage);
 }
 
 /* Unmap ALL DMA regions */
-void vfio_dma_unmapall(struct vfio_listener *listener)
+static void vfio_dma_unmapall(struct vfio_uiommu *uiommu)
 {
 	struct list_head *pos, *pos2;
 	struct dma_map_page *mlp;
 
-	mutex_lock(&listener->vdev->dgate);
-	list_for_each_safe(pos, pos2, &listener->dm_list) {
+	mutex_lock(&uiommu->dgate);
+	list_for_each_safe(pos, pos2, &uiommu->dm_list) {
 		mlp = list_entry(pos, struct dma_map_page, list);
-		vfio_dma_unmap(listener, mlp->daddr, mlp->npage,
+		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage,
 			       mlp->pages, mlp->rdwr);
 		list_del(&mlp->list);
 		vfree(mlp->pages);
 		kfree(mlp);
 	}
-	mutex_unlock(&listener->vdev->dgate);
+	mutex_unlock(&uiommu->dgate);
 }
 
 /* Map DMA region */
 /* dgate must be held */
-static int vfio_dma_map(struct vfio_listener *listener, unsigned long iova,
+static int vfio_dma_map(struct vfio_uiommu *uiommu, unsigned long iova,
 			int npage, struct page **pages, int rdwr)
 {
-	struct vfio_dev *vdev = listener->vdev;
 	unsigned long start = iova;
 	int i, ret;
 
 	/* Verify pages are not already mapped */
 	for (i = 0; i < npage; i++, iova += PAGE_SIZE)
-		if (uiommu_iova_to_phys(vdev->udomain, iova))
+		if (uiommu_iova_to_phys(uiommu->udomain, iova))
 			return -EBUSY;
 
 	for (iova = start, i = 0; i < npage; i++, iova += PAGE_SIZE) {
-		ret = uiommu_map(vdev->udomain, iova,
+		ret = uiommu_map(uiommu->udomain, iova,
 				 page_to_phys(pages[i]), 0, rdwr);
 		if (!ret)
 			continue;
 
 		/* Back out mappings on error */
 		for (i--, iova -= PAGE_SIZE; i >= 0; i--, iova -= PAGE_SIZE)
-			uiommu_unmap(vdev->udomain, iova, 0);
+			uiommu_unmap(uiommu->udomain, iova, 0);
 		return ret;
 	}
-	vdev->locked_pages += npage;
+	uiommu->locked_pages += npage;
 	vfio_lock_acct(npage);
 	return 0;
 }
 
-static struct dma_map_page *vfio_find_dma(struct vfio_listener *listener,
+static struct dma_map_page *vfio_find_dma(struct vfio_uiommu *uiommu,
 					  dma_addr_t start, size_t size)
 {
 	struct list_head *pos;
 	struct dma_map_page *mlp;
 
-	list_for_each(pos, &listener->dm_list) {
+	list_for_each(pos, &uiommu->dm_list) {
 		mlp = list_entry(pos, struct dma_map_page, list);
 		if (!(mlp->daddr + NPAGE_TO_SIZE(mlp->npage) <= start ||
 		      mlp->daddr >= start + size))
@@ -178,13 +179,13 @@ static struct dma_map_page *vfio_find_dma(struct vfio_listener *listener,
 	return NULL;
 }
 
-static struct dma_map_page *vfio_find_vaddr(struct vfio_listener *listener,
+static struct dma_map_page *vfio_find_vaddr(struct vfio_uiommu *uiommu,
 					    unsigned long start, size_t size)
 {
 	struct list_head *pos;
 	struct dma_map_page *mlp;
 
-	list_for_each(pos, &listener->dm_list) {
+	list_for_each(pos, &uiommu->dm_list) {
 		mlp = list_entry(pos, struct dma_map_page, list);
 		if (!(mlp->vaddr + NPAGE_TO_SIZE(mlp->npage) <= start ||
 		      mlp->vaddr >= start + size))
@@ -193,7 +194,7 @@ static struct dma_map_page *vfio_find_vaddr(struct vfio_listener *listener,
 	return NULL;
 }
 
-int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
+int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 			    size_t size, struct dma_map_page *mlp,
 			    size_t *remaining)
 {
@@ -204,7 +205,7 @@ int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
 	/* Existing dma region is completely covered, unmap all */
 	if (start <= mlp->daddr &&
 	    start + size >= mlp->daddr + NPAGE_TO_SIZE(mlp->npage)) {
-		vfio_dma_unmap(listener, mlp->daddr, mlp->npage,
+		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage,
 			       mlp->pages, mlp->rdwr);
 		list_del(&mlp->list);
 		vfree(mlp->pages);
@@ -226,7 +227,7 @@ int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
 		if (!pages_hi)
 			return -ENOMEM;
 
-		vfio_dma_unmap(listener, mlp->daddr, npage_lo,
+		vfio_dma_unmap(uiommu, mlp->daddr, npage_lo,
 			       mlp->pages, mlp->rdwr);
 		mlp->daddr += overlap;
 		mlp->vaddr += overlap;
@@ -252,7 +253,7 @@ int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
 		if (!pages_lo)
 			return -ENOMEM;
 
-		vfio_dma_unmap(listener, start, npage_hi,
+		vfio_dma_unmap(uiommu, start, npage_hi,
 			       &mlp->pages[npage_lo], mlp->rdwr);
 		mlp->npage -= npage_hi;
 		memcpy(pages_lo, mlp->pages,
@@ -285,7 +286,7 @@ int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
 		return -ENOMEM;
 	}
 
-	vfio_dma_unmap(listener, start, size >> PAGE_SHIFT,
+	vfio_dma_unmap(uiommu, start, size >> PAGE_SHIFT,
 		       &mlp->pages[npage_lo], mlp->rdwr);
 
 	memcpy(pages_lo, mlp->pages, npage_lo * sizeof(struct page *));
@@ -301,13 +302,13 @@ int vfio_remove_dma_overlap(struct vfio_listener *listener, dma_addr_t start,
 	split->daddr = start + size;
 	split->vaddr = mlp->vaddr + NPAGE_TO_SIZE(npage_lo) + size;
 	split->rdwr = mlp->rdwr;
-	list_add(&split->list, &listener->dm_list);
+	list_add(&split->list, &uiommu->dm_list);
 	if (remaining)
 		*remaining -= size;
 	return 0;
 }
 
-int vfio_dma_unmap_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
+int vfio_dma_unmap_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 {
 	struct dma_map_page *mlp;
 	int ret = 0;
@@ -318,18 +319,18 @@ int vfio_dma_unmap_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 	if (size & (PAGE_SIZE-1))
 		return -EINVAL;
 
-	if (!listener->vdev->udomain)
+	if (!uiommu)
 		return -EINVAL;
 
-	mutex_lock(&listener->vdev->dgate);
+	mutex_lock(&uiommu->dgate);
 	while (size &&
-	       (mlp = vfio_find_dma(listener, dmp->dmaaddr, dmp->size))) {
-		ret = vfio_remove_dma_overlap(listener, dmp->dmaaddr,
+	       (mlp = vfio_find_dma(uiommu, dmp->dmaaddr, dmp->size))) {
+		ret = vfio_remove_dma_overlap(uiommu, dmp->dmaaddr,
 					      dmp->size, mlp, &size);
 		if (ret)
 			break;
 	}
-	mutex_unlock(&listener->vdev->dgate);
+	mutex_unlock(&uiommu->dgate);
 	return ret;
 }
 
@@ -340,16 +341,16 @@ int vfio_dma_unmap_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
 		unsigned long start, unsigned long end)
 {
-	struct vfio_listener *listener;
+	struct vfio_uiommu *uiommu;
 	struct dma_map_page *mlp;
 
-	listener = container_of(mn, struct vfio_listener, mmu_notifier);
-	mutex_lock(&listener->vdev->dgate);
+	uiommu = container_of(mn, struct vfio_uiommu, mmu_notifier);
+	mutex_lock(&uiommu->dgate);
 
 	/* vaddrs are not unique (multiple daddrs could be mapped to the
 	 * same vaddr), therefore we have to search to exhaustion rather
 	 * than tracking how much we've unmapped. */
-	while ((mlp = vfio_find_vaddr(listener, start, end - start))) {
+	while ((mlp = vfio_find_vaddr(uiommu, start, end - start))) {
 		dma_addr_t dma_start;
 		int ret;
 
@@ -358,7 +359,7 @@ static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
 			dma_start -= mlp->vaddr - start;
 		else
 			dma_start += start - mlp->vaddr;
-		ret = vfio_remove_dma_overlap(listener, dma_start,
+		ret = vfio_remove_dma_overlap(uiommu, dma_start,
 					      end - start, mlp, NULL);
 		if (ret) {
 			printk(KERN_ERR "%s: "
@@ -367,7 +368,7 @@ static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
 			break;
 		}
 	}
-	mutex_unlock(&listener->vdev->dgate);
+	mutex_unlock(&uiommu->dgate);
 }
 
 static void vfio_dma_inval_page(struct mmu_notifier *mn,
@@ -388,9 +389,8 @@ static const struct mmu_notifier_ops vfio_dma_mmu_notifier_ops = {
 };
 #endif	/* CONFIG_MMU_NOTIFIER */
 
-int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
+int vfio_dma_map_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 {
-	struct vfio_dev *vdev = listener->vdev;
 	int npage, locked, lock_limit;
 	struct page **pages;
 	struct dma_map_page *mlp, *nmlp, *mmlp = NULL;
@@ -411,17 +411,17 @@ int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 	if (!npage)
 		return -EINVAL;
 
-	if (!vdev->udomain)
+	if (!uiommu)
 		return -EINVAL;
 
 	if (dmp->flags & VFIO_FLAG_WRITE)
 		rdwr |= IOMMU_WRITE;
-	if (vdev->cachec)
+	if (uiommu->cachec)
 		rdwr |= IOMMU_CACHE;
 
-	mutex_lock(&listener->vdev->dgate);
+	mutex_lock(&uiommu->dgate);
 
-	if (vfio_find_dma(listener, daddr, size)) {
+	if (vfio_find_dma(uiommu, daddr, size)) {
 		ret = -EBUSY;
 		goto out_lock;
 	}
@@ -434,23 +434,6 @@ int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 			__func__);
 		ret = -ENOMEM;
 		goto out_lock;
-	}
-	/* only 1 address space per fd */
-	if (current->mm != listener->mm) {
-		if (listener->mm) {
-			ret = -EINVAL;
-			goto out_lock;
-		}
-		listener->mm = current->mm;
-#ifdef CONFIG_MMU_NOTIFIER
-		listener->mmu_notifier.ops = &vfio_dma_mmu_notifier_ops;
-		ret = mmu_notifier_register(&listener->mmu_notifier,
-						listener->mm);
-		if (ret)
-			printk(KERN_ERR "%s: mmu_notifier_register failed %d\n",
-				__func__, ret);
-		ret = 0;
-#endif
 	}
 
 	/* Allocate a new mlp, this may not be used if we merge, but
@@ -480,7 +463,7 @@ int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 		goto out_lock;
 	}
 
-	ret = vfio_dma_map(listener, daddr, npage, pages, rdwr);
+	ret = vfio_dma_map(uiommu, daddr, npage, pages, rdwr);
 	if (ret) {
 		while (npage--)
 			put_page(pages[npage]);
@@ -491,7 +474,7 @@ int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 
 	/* Check if we abut a region below */
 	if (daddr) {
-		mlp = vfio_find_dma(listener, daddr - 1, 1);
+		mlp = vfio_find_dma(uiommu, daddr - 1, 1);
 		if (mlp && mlp->rdwr == rdwr &&
 		    mlp->vaddr + NPAGE_TO_SIZE(mlp->npage) == vaddr) {
 			struct page **mpages;
@@ -523,7 +506,7 @@ int vfio_dma_map_dm(struct vfio_listener *listener, struct vfio_dma_map *dmp)
 	}
 
 	if (daddr + size) {
-		mlp = vfio_find_dma(listener, daddr + size, 1);
+		mlp = vfio_find_dma(uiommu, daddr + size, 1);
 		if (mlp && mlp->rdwr == rdwr && mlp->vaddr == vaddr + size) {
 			struct page **mpages;
 
@@ -560,56 +543,67 @@ no_merge:
 		nmlp->daddr = daddr;
 		nmlp->vaddr = vaddr;
 		nmlp->rdwr = rdwr;
-		list_add(&nmlp->list, &listener->dm_list);
+		list_add(&nmlp->list, &uiommu->dm_list);
 	} else
 		kfree(nmlp);
 
 out_lock:
-	mutex_unlock(&listener->vdev->dgate);
+	mutex_unlock(&uiommu->dgate);
 	return ret;
 }
 
-int vfio_domain_unset(struct vfio_listener *listener)
+int vfio_domain_unset(struct vfio_dev *vdev)
 {
-	struct vfio_dev *vdev = listener->vdev;
 	struct pci_dev *pdev = vdev->pdev;
+	struct uiommu_domain *udomain;
 
-	if (!vdev->udomain)
+	if (!vdev->uiommu)
 		return 0;
-	if (!list_empty(&listener->dm_list))
-		return -EBUSY;
-	uiommu_detach_device(vdev->udomain, &pdev->dev);
-	uiommu_put(vdev->udomain);
-	vdev->udomain = NULL;
+
+	udomain = vdev->uiommu->udomain;
+
+	mutex_lock(&vfio_uiommu_lock);
+	if (--vdev->uiommu->refcnt == 0) {
+#ifdef CONFIG_MMU_NOTIFIER
+		mmu_notifier_unregister(&vdev->uiommu->mmu_notifier,
+					vdev->uiommu->mm);
+#endif
+		vfio_dma_unmapall(vdev->uiommu);
+		list_del(&vdev->uiommu->next);
+		kfree(vdev->uiommu);
+	}
+	mutex_unlock(&vfio_uiommu_lock);
+
+	uiommu_detach_device(udomain, &pdev->dev);
+	uiommu_put(udomain);
+	vdev->uiommu = NULL;
 	return 0;
 }
 
-int vfio_domain_set(struct vfio_listener *listener, int fd, int unsafe_ok)
+int vfio_domain_set(struct vfio_dev *vdev, int fd, int unsafe_ok)
 {
-	struct vfio_dev *vdev = listener->vdev;
-	struct uiommu_domain *udomain;
 	struct pci_dev *pdev = vdev->pdev;
-	int ret;
-	int safe;
+	struct uiommu_domain *udomain;
+	struct list_head *pos;
+	struct vfio_uiommu *uiommu = NULL;
+	int ret, cachec, intremap = 0;
 
-	if (vdev->udomain)
+	if (vdev->uiommu)
 		return -EBUSY;
+
 	udomain = uiommu_fdget(fd);
 	if (IS_ERR(udomain))
 		return PTR_ERR(udomain);
 
-	safe = 0;
 #ifdef IOMMU_CAP_INTR_REMAP	/* >= 2.6.36 */
 	/* iommu domain must also isolate dev interrupts */
-	if (uiommu_domain_has_cap(udomain, IOMMU_CAP_INTR_REMAP))
-		safe = 1;
+	intremap = uiommu_domain_has_cap(udomain, IOMMU_CAP_INTR_REMAP);
 #endif
-	if (!safe && !unsafe_ok) {
+	if (!intremap && !unsafe_ok) {
 		printk(KERN_WARNING "%s: no interrupt remapping!\n", __func__);
 		return -EINVAL;
 	}
 
-	vfio_domain_unset(listener);
 	ret = uiommu_attach_device(udomain, &pdev->dev);
 	if (ret) {
 		printk(KERN_ERR "%s: attach_device failed %d\n",
@@ -617,8 +611,50 @@ int vfio_domain_set(struct vfio_listener *listener, int fd, int unsafe_ok)
 		uiommu_put(udomain);
 		return ret;
 	}
-	vdev->cachec = iommu_domain_has_cap(udomain->domain,
-				IOMMU_CAP_CACHE_COHERENCY);
-	vdev->udomain = udomain;
-	return 0;
+
+	cachec = iommu_domain_has_cap(udomain->domain,
+				      IOMMU_CAP_CACHE_COHERENCY);
+
+	mutex_lock(&vfio_uiommu_lock);
+	list_for_each(pos, &vfio_uiommu_list) {
+		uiommu = list_entry(pos, struct vfio_uiommu, next);
+		if (uiommu->udomain == udomain)
+			break;
+		uiommu = NULL;
+	}
+
+	if (!uiommu) {
+		uiommu = kzalloc(sizeof(*uiommu), GFP_KERNEL);
+		if (!uiommu) {
+			uiommu_detach_device(udomain, &pdev->dev);
+			uiommu_put(udomain);
+			ret = -ENOMEM;
+			goto out_lock;
+		}
+		uiommu->udomain = udomain;
+		uiommu->cachec = cachec;
+		uiommu->mm = current->mm;
+#ifdef CONFIG_MMU_NOTIFIER
+		uiommu->mmu_notifier.ops = &vfio_dma_mmu_notifier_ops;
+		ret = mmu_notifier_register(&uiommu->mmu_notifier, uiommu->mm);
+		if (ret)
+			printk(KERN_ERR "%s: mmu_notifier_register failed %d\n",
+				__func__, ret);
+		ret = 0;
+#endif
+		INIT_LIST_HEAD(&uiommu->dm_list);
+		mutex_init(&uiommu->dgate);
+		list_add(&uiommu->next, &vfio_uiommu_list);
+	} else if (uiommu->cachec != cachec || uiommu->mm != current->mm) {
+		uiommu_detach_device(udomain, &pdev->dev);
+		uiommu_put(udomain);
+		ret = -EINVAL;
+		goto out_lock;
+	}
+	uiommu->refcnt++;
+	mutex_unlock(&vfio_uiommu_lock);
+
+	vdev->uiommu = uiommu;
+out_lock:
+	return ret;
 }
