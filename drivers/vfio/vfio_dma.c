@@ -259,6 +259,12 @@ static int vfio_dma_map(struct vfio_uiommu *uiommu, unsigned long iova,
 	return 0;
 }
 
+static inline int ranges_overlap(unsigned long start1, size_t size1,
+				 unsigned long start2, size_t size2)
+{
+	return !(start1 + size1 <= start2 || start2 + size2 <= start1);
+}
+
 static struct dma_map_page *vfio_find_dma(struct vfio_uiommu *uiommu,
 					  dma_addr_t start, size_t size)
 {
@@ -267,31 +273,15 @@ static struct dma_map_page *vfio_find_dma(struct vfio_uiommu *uiommu,
 
 	list_for_each(pos, &uiommu->dm_list) {
 		mlp = list_entry(pos, struct dma_map_page, list);
-		if (!(mlp->daddr + NPAGE_TO_SIZE(mlp->npage) <= start ||
-		      mlp->daddr >= start + size))
-			return mlp;
-	}
-	return NULL;
-}
-
-static struct dma_map_page *vfio_find_vaddr(struct vfio_uiommu *uiommu,
-					    unsigned long start, size_t size)
-{
-	struct list_head *pos;
-	struct dma_map_page *mlp;
-
-	list_for_each(pos, &uiommu->dm_list) {
-		mlp = list_entry(pos, struct dma_map_page, list);
-		if (!(mlp->vaddr + NPAGE_TO_SIZE(mlp->npage) <= start ||
-		      mlp->vaddr >= start + size))
+		if (ranges_overlap(mlp->daddr, NPAGE_TO_SIZE(mlp->npage),
+				   start, size))
 			return mlp;
 	}
 	return NULL;
 }
 
 int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
-			    size_t size, struct dma_map_page *mlp,
-			    size_t *remaining)
+			    size_t size, struct dma_map_page *mlp)
 {
 	struct dma_map_page *split;
 	int npage_lo, npage_hi;
@@ -301,10 +291,9 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 	    start + size >= mlp->daddr + NPAGE_TO_SIZE(mlp->npage)) {
 		vfio_dma_unmap(uiommu, mlp->daddr, mlp->npage, mlp->rdwr);
 		list_del(&mlp->list);
-		if (remaining)
-			*remaining -= NPAGE_TO_SIZE(mlp->npage);
+		npage_lo = mlp->npage;
 		kfree(mlp);
-		return 0;
+		return npage_lo;
 	}
 
 	/* Overlap low address of existing range */
@@ -319,9 +308,7 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 		mlp->daddr += overlap;
 		mlp->vaddr += overlap;
 		mlp->npage -= npage_lo;
-		if (remaining)
-			*remaining -= overlap;
-		return 0;
+		return npage_lo;
 	}
 
 	/* Overlap high address of existing range */
@@ -334,9 +321,7 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 
 		vfio_dma_unmap(uiommu, start, npage_hi, mlp->rdwr);
 		mlp->npage -= npage_hi;
-		if (remaining)
-			*remaining -= overlap;
-		return 0;
+		return npage_hi;
 	}
 
 	/* Split existing */
@@ -356,35 +341,41 @@ int vfio_remove_dma_overlap(struct vfio_uiommu *uiommu, dma_addr_t start,
 	split->vaddr = mlp->vaddr + NPAGE_TO_SIZE(npage_lo) + size;
 	split->rdwr = mlp->rdwr;
 	list_add(&split->list, &uiommu->dm_list);
-	if (remaining)
-		*remaining -= size;
-	return 0;
+	return size >> PAGE_SHIFT;
 }
 
 int vfio_dma_unmap_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
 {
-	struct dma_map_page *mlp;
 	int ret = 0;
-	size_t size = dmp->size;
+	size_t npage = dmp->size >> PAGE_SHIFT;
+	struct list_head *pos, *n;
 
 	if (dmp->dmaaddr & (PAGE_SIZE-1))
 		return -EINVAL;
-	if (size & (PAGE_SIZE-1))
+	if (dmp->size & (PAGE_SIZE-1))
 		return -EINVAL;
 
 	if (!uiommu)
 		return -EINVAL;
 
 	mutex_lock(&uiommu->dgate);
-	while (size &&
-	       (mlp = vfio_find_dma(uiommu, dmp->dmaaddr, dmp->size))) {
-		ret = vfio_remove_dma_overlap(uiommu, dmp->dmaaddr,
-					      dmp->size, mlp, &size);
-		if (ret)
-			break;
+
+	list_for_each_safe(pos, n, &uiommu->dm_list) {
+		struct dma_map_page *mlp;
+
+		mlp = list_entry(pos, struct dma_map_page, list);
+		if (ranges_overlap(mlp->daddr, NPAGE_TO_SIZE(mlp->npage),
+				   dmp->dmaaddr, dmp->size)) {
+			ret = vfio_remove_dma_overlap(uiommu, dmp->dmaaddr,
+						      dmp->size, mlp);
+			if (ret > 0)
+				npage -= NPAGE_TO_SIZE(ret);
+			if (ret < 0 || npage == 0)
+				break;
+		}
 	}
 	mutex_unlock(&uiommu->dgate);
-	return ret;
+	return ret > 0 ? 0 : ret;
 }
 
 #ifdef CONFIG_MMU_NOTIFIER
@@ -392,10 +383,11 @@ int vfio_dma_unmap_dm(struct vfio_uiommu *uiommu, struct vfio_dma_map *dmp)
  * which may be in use in a DMA region. Clean up region if so.
  */
 static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
-		unsigned long start, unsigned long end)
+				       unsigned long start, unsigned long end)
 {
 	struct vfio_uiommu *uiommu;
-	struct dma_map_page *mlp;
+	struct list_head *pos, *n;
+	size_t size = end - start;
 
 	uiommu = container_of(mn, struct vfio_uiommu, mmu_notifier);
 	mutex_lock(&uiommu->dgate);
@@ -403,18 +395,24 @@ static void vfio_dma_handle_mmu_notify(struct mmu_notifier *mn,
 	/* vaddrs are not unique (multiple daddrs could be mapped to the
 	 * same vaddr), therefore we have to search to exhaustion rather
 	 * than tracking how much we've unmapped. */
-	while ((mlp = vfio_find_vaddr(uiommu, start, end - start))) {
+	list_for_each_safe(pos, n, &uiommu->dm_list) {
+		struct dma_map_page *mlp;
 		dma_addr_t dma_start;
 		int ret;
+
+		mlp = list_entry(pos, struct dma_map_page, list);
+
+		if (!ranges_overlap(mlp->vaddr, NPAGE_TO_SIZE(mlp->npage),
+				    start, size))
+			continue;
 
 		dma_start = mlp->daddr;
 		if (start < mlp->vaddr)
 			dma_start -= mlp->vaddr - start;
 		else
 			dma_start += start - mlp->vaddr;
-		ret = vfio_remove_dma_overlap(uiommu, dma_start,
-					      end - start, mlp, NULL);
-		if (ret) {
+		ret = vfio_remove_dma_overlap(uiommu, dma_start, size, mlp);
+		if (ret < 0) {
 			printk(KERN_ERR "%s: "
 			       "failed to unmap mmu notify range "
 			       "%lx - %lx (%d)\n", __func__, start, end, ret);
