@@ -35,7 +35,6 @@
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <net/genetlink.h>
-#include <linux/mmu_notifier.h>
 #include <linux/vfio.h>
 
 static u32 vfio_seq_num;
@@ -272,7 +271,7 @@ static int vfio_nl_pm_suspend_reply(struct sk_buff *skb, struct genl_info *info)
 	vdev = vfio_nl_get_vdev(info);
 	if (!vdev)
 		return -EINVAL;
-	if (vdev->listeners == 0)
+	if (vdev->refcnt == 0)
 		return -EINVAL;
 	vfio_pm_process_reply(value);
 	return 0;

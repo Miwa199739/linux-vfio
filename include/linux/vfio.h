@@ -42,6 +42,17 @@ struct vfio_nl_client {
 	u32			pid;
 };
 
+struct vfio_uiommu {
+	struct uiommu_domain	*udomain;
+	struct mutex		dgate;		/* dma op gate */
+	struct list_head	dm_list;
+	u32			locked_pages;
+	struct mm_struct	*mm;
+	struct list_head	next;
+	int			refcnt;
+	int			cachec;
+};
+
 struct perm_bits;
 struct eoi_eventfd;
 struct vfio_dev {
@@ -53,10 +64,9 @@ struct vfio_dev {
 	int		devnum;
 	void __iomem	*barmap[PCI_STD_RESOURCE_END+1];
 	spinlock_t	irqlock;	/* guards command register accesses */
-	int		listeners;
-	u32		locked_pages;
-	struct mutex	lgate;		/* listener gate */
-	struct mutex	dgate;		/* dma op gate */
+	struct vfio_uiommu	*uiommu;
+	int		refcnt;
+	struct mutex	vgate;		/* device init/shutdown, refcnt gate */
 	struct mutex	igate;		/* intr op gate */
 	struct mutex	ngate;		/* netlink op gate */
 	struct list_head nlc_list;	/* netlink clients */
@@ -64,8 +74,6 @@ struct vfio_dev {
 	wait_queue_head_t nl_wait_q;
 	u32		nl_reply_seq;
 	u32		nl_reply_value;
-	int		mapcount;
-	struct uiommu_domain	*udomain;
 	int			cachec;
 	struct msix_entry	*msix;
 	struct eventfd_ctx	*ev_irq;
@@ -84,20 +92,12 @@ struct vfio_dev {
 	struct eoi_eventfd	*ev_eoi;
 };
 
-struct vfio_listener {
-	struct vfio_dev	*vdev;
-	struct list_head	dm_list;
-	struct mm_struct	*mm;
-	struct mmu_notifier	mmu_notifier;
-};
-
 /*
  * Structure for keeping track of memory nailed down by the
  * user for DMA
  */
 struct dma_map_page {
 	struct list_head list;
-	struct page     **pages;
 	dma_addr_t      daddr;
 	unsigned long	vaddr;
 	int		npage;
@@ -131,10 +131,8 @@ int vfio_setup_msix(struct vfio_dev *, int, int __user *);
 #endif
 
 struct vfio_dma_map;
-void vfio_dma_unmapall(struct vfio_listener *);
-int vfio_dma_unmap_dm(struct vfio_listener *, struct vfio_dma_map *);
-int vfio_dma_map_common(struct vfio_listener *, unsigned int,
-			struct vfio_dma_map *);
+int vfio_dma_unmap_dm(struct vfio_uiommu *, struct vfio_dma_map *);
+int vfio_dma_map_dm(struct vfio_uiommu *, struct vfio_dma_map *);
 int vfio_domain_set(struct vfio_dev *, int, int);
 int vfio_domain_unset(struct vfio_dev *);
 

@@ -38,7 +38,6 @@
 
 #include <linux/fs.h>
 #include <linux/pci.h>
-#include <linux/mmu_notifier.h>
 #include <linux/uaccess.h>
 #include <linux/vfio.h>
 

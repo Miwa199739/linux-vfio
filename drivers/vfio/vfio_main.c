@@ -41,7 +41,6 @@
 #include <linux/eventfd.h>
 #include <linux/pci.h>
 #include <linux/iommu.h>
-#include <linux/mmu_notifier.h>
 #include <linux/uaccess.h>
 #include <linux/suspend.h>
 #include <linux/compat.h>
@@ -93,27 +92,16 @@ static inline int overlap(int a1, int b1, int a2, int b2)
 static int vfio_open(struct inode *inode, struct file *filep)
 {
 	struct vfio_dev *vdev;
-	struct vfio_listener *listener;
 	int ret = 0;
 
 	mutex_lock(&vfio_minor_lock);
 	vdev = idr_find(&vfio_idr, iminor(inode));
 	mutex_unlock(&vfio_minor_lock);
-	if (!vdev) {
-		ret = -ENODEV;
-		goto out;
-	}
+	if (!vdev)
+		return -ENODEV;
 
-	listener = kzalloc(sizeof(*listener), GFP_KERNEL);
-	if (!listener) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	mutex_lock(&vdev->lgate);
-	listener->vdev = vdev;
-	INIT_LIST_HEAD(&listener->dm_list);
-	if (vdev->listeners == 0) {
+	mutex_lock(&vdev->vgate);
+	if (!vdev->refcnt) {
 		u16 cmd;
 		(void) pci_reset_function(vdev->pdev);
 		msleep(100);	/* 100ms for reset recovery */
@@ -125,13 +113,12 @@ static int vfio_open(struct inode *inode, struct file *filep)
 		ret = pci_enable_device(vdev->pdev);
 	}
 	if (!ret) {
-		filep->private_data = listener;
-		vdev->listeners++;
+		vdev->refcnt++;
+		filep->private_data = vdev;
 	}
-	mutex_unlock(&vdev->lgate);
-	if (ret)
-		kfree(listener);
-out:
+
+	mutex_unlock(&vdev->vgate);
+
 	return ret;
 }
 
@@ -157,22 +144,12 @@ static void vfio_disable_pci(struct vfio_dev *vdev)
 
 static int vfio_release(struct inode *inode, struct file *filep)
 {
-	int ret = 0;
-	struct vfio_listener *listener = filep->private_data;
-	struct vfio_dev *vdev = listener->vdev;
+	struct vfio_dev *vdev = filep->private_data;
 
-	vfio_dma_unmapall(listener);
-	if (listener->mm) {
-#ifdef CONFIG_MMU_NOTIFIER
-		mmu_notifier_unregister(&listener->mmu_notifier, listener->mm);
-#endif
-		listener->mm = NULL;
-	}
-
-	mutex_lock(&vdev->lgate);
-	if (--vdev->listeners <= 0) {
+	mutex_lock(&vdev->vgate);
+	if (--vdev->refcnt == 0) {
 		/* we don't need to hold igate here since there are
-		 * no more listeners doing ioctls
+		 * no other users doing ioctls
 		 */
 		if (vdev->ev_msix)
 			vfio_drop_msix(vdev);
@@ -193,17 +170,14 @@ static int vfio_release(struct inode *inode, struct file *filep)
 		vfio_domain_unset(vdev);
 		wake_up(&vdev->dev_idle_q);
 	}
-	mutex_unlock(&vdev->lgate);
-
-	kfree(listener);
-	return ret;
+	mutex_unlock(&vdev->vgate);
+	return 0;
 }
 
 static ssize_t vfio_read(struct file *filep, char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	struct vfio_listener *listener = filep->private_data;
-	struct vfio_dev *vdev = listener->vdev;
+	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
 	u8 pci_space;
 
@@ -214,7 +188,7 @@ static ssize_t vfio_read(struct file *filep, char __user *buf,
 		return vfio_config_readwrite(0, vdev, buf, count, ppos);
 
 	/* no other reads until IOMMU domain set */
-	if (!vdev->udomain)
+	if (!vdev->uiommu)
 		return -EINVAL;
 	if (pci_space > PCI_ROM_RESOURCE)
 		return -EINVAL;
@@ -261,14 +235,13 @@ static int vfio_msix_check(struct vfio_dev *vdev, u64 start, u32 len)
 static ssize_t vfio_write(struct file *filep, const char __user *buf,
 			size_t count, loff_t *ppos)
 {
-	struct vfio_listener *listener = filep->private_data;
-	struct vfio_dev *vdev = listener->vdev;
+	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
 	u8 pci_space;
 	int ret;
 
 	/* no writes until IOMMU domain set */
-	if (!vdev->udomain)
+	if (!vdev->uiommu)
 		return -EINVAL;
 	pci_space = vfio_offset_to_pci_space(*ppos);
 	if (pci_space == VFIO_PCI_CONFIG_RESOURCE)
@@ -294,8 +267,7 @@ static ssize_t vfio_write(struct file *filep, const char __user *buf,
 
 static int vfio_mmap(struct file *filep, struct vm_area_struct *vma)
 {
-	struct vfio_listener *listener = filep->private_data;
-	struct vfio_dev *vdev = listener->vdev;
+	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
 	unsigned long requested, actual;
 	int pci_space;
@@ -305,7 +277,7 @@ static int vfio_mmap(struct file *filep, struct vm_area_struct *vma)
 	int ret;
 
 	/* no reads or writes until IOMMU domain set */
-	if (!vdev->udomain)
+	if (!vdev->uiommu)
 		return -EINVAL;
 
 	if (vma->vm_end < vma->vm_start)
@@ -365,8 +337,7 @@ static long vfio_unl_ioctl(struct file *filep,
 			unsigned int cmd,
 			unsigned long arg)
 {
-	struct vfio_listener *listener = filep->private_data;
-	struct vfio_dev *vdev = listener->vdev;
+	struct vfio_dev *vdev = filep->private_data;
 	void __user *uarg = (void __user *)arg;
 	int __user *intargp = (void __user *)arg;
 	struct pci_dev *pdev = vdev->pdev;
@@ -383,7 +354,7 @@ static long vfio_unl_ioctl(struct file *filep,
 	case VFIO_DMA_MAP_IOVA:
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
-		ret = vfio_dma_map_common(listener, cmd, &dm);
+		ret = vfio_dma_map_dm(vdev->uiommu, &dm);
 		if (!ret && copy_to_user(uarg, &dm, sizeof dm))
 			ret = -EFAULT;
 		break;
@@ -391,7 +362,7 @@ static long vfio_unl_ioctl(struct file *filep,
 	case VFIO_DMA_UNMAP:
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
-		ret = vfio_dma_unmap_dm(listener, &dm);
+		ret = vfio_dma_unmap_dm(vdev->uiommu, &dm);
 		break;
 
 	case VFIO_EVENTFD_IRQ:
@@ -635,8 +606,7 @@ static int vfio_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	vdev->pci_2_3 = (verify_pci_2_3(pdev) == 0);
 
-	mutex_init(&vdev->lgate);
-	mutex_init(&vdev->dgate);
+	mutex_init(&vdev->vgate);
 	mutex_init(&vdev->igate);
 	mutex_init(&vdev->ngate);
 	INIT_LIST_HEAD(&vdev->nlc_list);
@@ -686,7 +656,7 @@ static void vfio_remove(struct pci_dev *pdev)
 	ret = vfio_nl_remove(vdev);
 
 	/* wait for all closed */
-	wait_event(vdev->dev_idle_q, vdev->listeners == 0);
+	wait_event(vdev->dev_idle_q, vdev->refcnt == 0);
 
 	pci_disable_device(pdev);
 
@@ -734,7 +704,7 @@ static int vfio_pm_suspend(void)
 		vdev = idr_find(&vfio_idr, id);
 		if (!vdev)
 			continue;
-		if (vdev->listeners == 0)
+		if (vdev->refcnt == 0)
 			continue;
 		alive++;
 		ret = vfio_nl_upcall(vdev, VFIO_MSG_PM_SUSPEND, 0, 0);
@@ -765,7 +735,7 @@ static int vfio_pm_resume(void)
 		vdev = idr_find(&vfio_idr, id);
 		if (!vdev)
 			continue;
-		if (vdev->listeners == 0)
+		if (vdev->refcnt == 0)
 			continue;
 		(void) vfio_nl_upcall(vdev, VFIO_MSG_PM_RESUME, 0, 0);
 	}

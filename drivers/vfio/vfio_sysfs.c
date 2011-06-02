@@ -38,7 +38,6 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/pci.h>
-#include <linux/mmu_notifier.h>
 
 #include <linux/vfio.h>
 
@@ -98,7 +97,8 @@ static ssize_t show_locked_pages(struct device *dev,
 
 	if (!vdev)
 		return -ENODEV;
-	return sprintf(buf, "%u\n", vdev->locked_pages);
+	return sprintf(buf, "%u\n", vdev->uiommu ?
+		       vdev->uiommu->locked_pages : 0);
 }
 
 static DEVICE_ATTR(locked_pages, S_IRUGO, show_locked_pages, NULL);

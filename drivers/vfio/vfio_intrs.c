@@ -35,7 +35,6 @@
 #include <linux/interrupt.h>
 #include <linux/eventfd.h>
 #include <linux/pci.h>
-#include <linux/mmu_notifier.h>
 #include <linux/file.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
