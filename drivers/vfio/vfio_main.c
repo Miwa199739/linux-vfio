@@ -190,7 +190,7 @@ static int vfio_release(struct inode *inode, struct file *filep)
 		kfree(vdev->pci_config_map);
 		vdev->pci_config_map = NULL;
 		vfio_disable_pci(vdev);
-		vfio_domain_unset(vdev);
+		vfio_domain_unset(listener);
 		wake_up(&vdev->dev_idle_q);
 	}
 	mutex_unlock(&vdev->lgate);
@@ -383,7 +383,7 @@ static long vfio_unl_ioctl(struct file *filep,
 	case VFIO_DMA_MAP_IOVA:
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
-		ret = vfio_dma_map_common(listener, cmd, &dm);
+		ret = vfio_dma_map_dm(listener, &dm);
 		if (!ret && copy_to_user(uarg, &dm, sizeof dm))
 			ret = -EFAULT;
 		break;
@@ -473,11 +473,11 @@ static long vfio_unl_ioctl(struct file *filep,
 	case VFIO_DOMAIN_SET:
 		if (get_user(fd, intargp))
 			return -EFAULT;
-		ret = vfio_domain_set(vdev, fd, allow_unsafe_intrs);
+		ret = vfio_domain_set(listener, fd, allow_unsafe_intrs);
 		break;
 
 	case VFIO_DOMAIN_UNSET:
-		ret = vfio_domain_unset(vdev);
+		ret = vfio_domain_unset(listener);
 		break;
 
 	case VFIO_IRQ_EOI:

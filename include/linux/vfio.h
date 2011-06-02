@@ -64,7 +64,6 @@ struct vfio_dev {
 	wait_queue_head_t nl_wait_q;
 	u32		nl_reply_seq;
 	u32		nl_reply_value;
-	int		mapcount;
 	struct uiommu_domain	*udomain;
 	int			cachec;
 	struct msix_entry	*msix;
@@ -133,10 +132,9 @@ int vfio_setup_msix(struct vfio_dev *, int, int __user *);
 struct vfio_dma_map;
 void vfio_dma_unmapall(struct vfio_listener *);
 int vfio_dma_unmap_dm(struct vfio_listener *, struct vfio_dma_map *);
-int vfio_dma_map_common(struct vfio_listener *, unsigned int,
-			struct vfio_dma_map *);
-int vfio_domain_set(struct vfio_dev *, int, int);
-int vfio_domain_unset(struct vfio_dev *);
+int vfio_dma_map_dm(struct vfio_listener *, struct vfio_dma_map *);
+int vfio_domain_set(struct vfio_listener *, int, int);
+int vfio_domain_unset(struct vfio_listener *);
 
 int vfio_class_init(void);
 void vfio_class_destroy(void);
