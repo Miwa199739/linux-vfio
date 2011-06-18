@@ -154,7 +154,7 @@ out:
 static const struct nla_policy vfio_nl_reg_policy[VFIO_NL_ATTR_MAX+1] = {
 	[VFIO_ATTR_MSGCAP]	= { .type = NLA_U64 },
 	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
-	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U16 },
+	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
 };
@@ -162,14 +162,13 @@ static const struct nla_policy vfio_nl_reg_policy[VFIO_NL_ATTR_MAX+1] = {
 static struct vfio_dev *vfio_nl_get_vdev(struct genl_info *info)
 {
 	u32 domain;
-	u16 bus;
-	u8 slot, func;
+	u8 bus, slot, func;
 	u16 devfn;
 	struct pci_dev *pdev;
 	struct vfio_dev *vdev;
 
 	domain = nla_get_u32(info->attrs[VFIO_ATTR_PCI_DOMAIN]);
-	bus = nla_get_u16(info->attrs[VFIO_ATTR_PCI_BUS]);
+	bus = nla_get_u8(info->attrs[VFIO_ATTR_PCI_BUS]);
 	slot = nla_get_u8(info->attrs[VFIO_ATTR_PCI_SLOT]);
 	func = nla_get_u8(info->attrs[VFIO_ATTR_PCI_FUNC]);
 	devfn = PCI_DEVFN(slot, func);
@@ -230,7 +229,7 @@ out:
 static const struct nla_policy vfio_nl_err_policy[VFIO_NL_ATTR_MAX+1] = {
 	[VFIO_ATTR_ERROR_HANDLING_REPLY] = { .type = NLA_U32 },
 	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
-	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U16 },
+	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
 };
@@ -257,7 +256,7 @@ static int vfio_nl_error_handling_reply(struct sk_buff *skb,
 static const struct nla_policy vfio_nl_pm_policy[VFIO_NL_ATTR_MAX+1] = {
 	[VFIO_ATTR_PM_SUSPEND_REPLY] = { .type = NLA_U32 },
 	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
-	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U16 },
+	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
 };
@@ -349,7 +348,7 @@ int vfio_nl_remove(struct vfio_dev *vdev)
 		return -ENOBUFS;
 
 	NLA_PUT_U32(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
-	NLA_PUT_U16(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
+	NLA_PUT_U8(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_SLOT, PCI_SLOT(pdev->devfn));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_FUNC, PCI_FUNC(pdev->devfn));
 
@@ -375,7 +374,7 @@ int vfio_nl_upcall(struct vfio_dev *vdev, u8 type, int state, int waitret)
 	seq = nlmsg_hdr(msg)->nlmsg_seq;
 
 	NLA_PUT_U32(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
-	NLA_PUT_U16(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
+	NLA_PUT_U8(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_SLOT, PCI_SLOT(pdev->devfn));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_FUNC, PCI_FUNC(pdev->devfn));
 
