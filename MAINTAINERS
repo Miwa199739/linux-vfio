@@ -6717,7 +6717,7 @@ F:	Documentation/fb/uvesafb.txt
 F:	drivers/video/uvesafb.*
 
 VFIO DRIVER
-M:	Tom Lyon <pugs@ieee.org>
+M:	Alex Williamson <alex.williamson@redhat.com>
 L:	kvm@vger.kernel.org
 S:	Maintained
 F:	Documentation/vfio.txt
