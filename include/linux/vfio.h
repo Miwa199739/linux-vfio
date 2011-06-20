@@ -228,7 +228,7 @@ struct vfio_dma_map {
 #define	VFIO_PCI_BAR5_RESOURCE		0x5
 #define	VFIO_PCI_ROM_RESOURCE		0x6
 #define	VFIO_PCI_CONFIG_RESOURCE	0xF
-#define	VFIO_PCI_SPACE_SHIFT	32
+#define	VFIO_PCI_SPACE_SHIFT		48
 #define VFIO_PCI_CONFIG_OFF vfio_pci_space_to_offset(VFIO_PCI_CONFIG_RESOURCE)
 
 static inline int vfio_offset_to_pci_space(__u64 off)
@@ -236,9 +236,9 @@ static inline int vfio_offset_to_pci_space(__u64 off)
 	return (off >> VFIO_PCI_SPACE_SHIFT) & 0xF;
 }
 
-static inline __u32 vfio_offset_to_pci_offset(__u64 off)
+static inline __u64 vfio_offset_to_pci_offset(__u64 off)
 {
-	return off & (__u32)0xFFFFFFFF;
+	return off & (((__u64)(1) << VFIO_PCI_SPACE_SHIFT) - 1);
 }
 
 static inline __u64 vfio_pci_space_to_offset(int sp)
