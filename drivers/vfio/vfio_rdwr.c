@@ -141,11 +141,12 @@ ssize_t vfio_mem_readwrite(
 		loff_t *ppos)
 {
 	struct pci_dev *pdev = vdev->pdev;
+	size_t done = 0;
 	resource_size_t end;
 	void __iomem *io;
 	loff_t pos;
 	u8 pci_space;
-	int ret;
+	int unit, ret;
 
 	pci_space = vfio_offset_to_pci_space(*ppos);
 	pos = vfio_offset_to_pci_offset(*ppos);
@@ -184,19 +185,57 @@ ssize_t vfio_mem_readwrite(
 	}
 	if (pos + count > end)
 		count = end - pos;
-	if (write) {
-		if (copy_from_user(io + pos, buf, count)) {
-			ret = -EFAULT;
-			goto out;
+
+	ret = -EFAULT;
+
+	while (count > 0) {
+		if ((pos % 4) == 0 && count >= 4) {
+			u32 val;
+
+			if (write) {
+				if (copy_from_user(&val, buf, 4))
+					goto out;
+				iowrite32(val, io + pos);
+			} else {
+				val = ioread32(io + pos);
+				if (copy_to_user(buf, &val, 4))
+					goto out;
+			}
+			unit = 4;
+		} else if ((pos % 2) == 0 && count >= 2) {
+			u16 val;
+
+			if (write) {
+				if (copy_from_user(&val, buf, 2))
+					goto out;
+				iowrite16(val, io + pos);
+			} else {
+				val = ioread16(io + pos);
+				if (copy_to_user(buf, &val, 2))
+					goto out;
+			}
+			unit = 2;
+		} else {
+			u8 val;
+
+			if (write) {
+				if (copy_from_user(&val, buf, 1))
+					goto out;
+				iowrite8(val, io + pos);
+			} else {
+				val = ioread8(io + pos);
+				if (copy_to_user(buf, &val, 1))
+					goto out;
+			}
+			unit = 1;
 		}
-	} else {
-		if (copy_to_user(buf, io + pos, count)) {
-			ret = -EFAULT;
-			goto out;
-		}
+		pos += unit;
+		buf += unit;
+		count -= unit;
+		done += unit;
 	}
-	*ppos += count;
-	ret = count;
+	*ppos += done;
+	ret = done;
 out:
 	if (pci_space == PCI_ROM_RESOURCE && io)
 		pci_unmap_rom(pdev, io);
