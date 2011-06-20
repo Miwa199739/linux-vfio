@@ -89,6 +89,8 @@ struct vfio_dev {
 	bool		irq_disabled;
 	bool		virq_disabled;
 	struct eoi_eventfd	*ev_eoi;
+	bool		remove_pending;
+	struct pci_saved_state	*pci_saved_state;
 };
 
 /*

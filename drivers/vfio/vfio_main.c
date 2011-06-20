@@ -89,6 +89,14 @@ static inline int overlap(int a1, int b1, int a2, int b2)
 	return !(b2 <= a1 || b1 <= a2);
 }
 
+static int vfio_pci_reset_function(struct vfio_dev *vdev)
+{
+	if (unlikely(vdev->remove_pending))
+		return -EBUSY;
+
+	return pci_reset_function(vdev->pdev);
+}
+
 static int vfio_open(struct inode *inode, struct file *filep)
 {
 	struct vfio_dev *vdev;
@@ -103,8 +111,12 @@ static int vfio_open(struct inode *inode, struct file *filep)
 	mutex_lock(&vdev->vgate);
 	if (!vdev->refcnt) {
 		u16 cmd;
-		(void) pci_reset_function(vdev->pdev);
-		msleep(100);	/* 100ms for reset recovery */
+		vfio_pci_reset_function(vdev);
+		pci_save_state(vdev->pdev);
+		vdev->pci_saved_state = pci_store_saved_state(vdev->pdev);
+		if (!vdev->pci_saved_state)
+			printk(KERN_DEBUG "%s: Couldn't store %s saved state\n",
+			       __func__, dev_name(&vdev->pdev->dev));
 		pci_read_config_word(vdev->pdev, PCI_COMMAND, &cmd);
 		if (vdev->pci_2_3 && (cmd & PCI_COMMAND_INTX_DISABLE)) {
 			cmd &= ~PCI_COMMAND_INTX_DISABLE;
@@ -124,13 +136,19 @@ static int vfio_open(struct inode *inode, struct file *filep)
 
 /*
  * Disable PCI device
- * Can't call pci_reset_function here because it needs the
- * device lock which may be held during _remove events
  */
 static void vfio_disable_pci(struct vfio_dev *vdev)
 {
 	int bar;
 	struct pci_dev *pdev = vdev->pdev;
+
+	if (vfio_pci_reset_function(vdev) == 0) {
+		if (pci_load_and_free_saved_state(pdev, &vdev->pci_saved_state))
+			printk(KERN_INFO"%s: Couldn't reload %s saved state\n",
+			       __func__, dev_name(&pdev->dev));
+		else
+			pci_restore_state(pdev);
+	}
 
 	for (bar = PCI_STD_RESOURCES; bar <= PCI_STD_RESOURCE_END; bar++) {
 		if (!vdev->barmap[bar])
@@ -462,7 +480,7 @@ static long vfio_unl_ioctl(struct file *filep,
 		break;
 
 	case VFIO_RESET_FUNCTION:
-		ret = pci_reset_function(vdev->pdev);
+		ret = vfio_pci_reset_function(vdev);
 		break;
 
 	default:
@@ -651,6 +669,8 @@ static void vfio_remove(struct pci_dev *pdev)
 
 	/* prevent further opens */
 	vfio_free_minor(vdev);
+
+	vdev->remove_pending = true;
 
 	/* notify users */
 	ret = vfio_nl_remove(vdev);
