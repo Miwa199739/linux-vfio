@@ -50,11 +50,12 @@ irqreturn_t vfio_disable_intx(struct vfio_dev *vdev)
 {
 	struct pci_dev *pdev = vdev->pdev;
 	irqreturn_t ret = IRQ_NONE;
+	unsigned long flags;
 
-	spin_lock_irq(&vdev->irqlock);
+	spin_lock_irqsave(&vdev->irqlock, flags);
 
 	if (vdev->irq_disabled) {
-		spin_unlock_irq(&vdev->irqlock);
+		spin_unlock_irqrestore(&vdev->irqlock, flags);
 		return ret;
 	}
 
@@ -95,7 +96,7 @@ irqreturn_t vfio_disable_intx(struct vfio_dev *vdev)
 		ret = IRQ_HANDLED;
 	}
 
-	spin_unlock_irq(&vdev->irqlock);
+	spin_unlock_irqrestore(&vdev->irqlock, flags);
 
 	return ret;
 }
