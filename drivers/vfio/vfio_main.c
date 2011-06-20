@@ -180,15 +180,16 @@ static int vfio_release(struct inode *inode, struct file *filep)
 			vdev->irq_disabled = false;
 			vdev->virq_disabled = false;
 		}
+		vfio_nl_freeclients(vdev);
 		kfree(vdev->vconfig);
 		vdev->vconfig = NULL;
 		kfree(vdev->pci_config_map);
 		vdev->pci_config_map = NULL;
 		vfio_disable_pci(vdev);
 		vfio_domain_unset(vdev);
-		wake_up(&vdev->dev_idle_q);
 	}
 	mutex_unlock(&vdev->vgate);
+	wake_up(&vdev->dev_idle_q);
 	return 0;
 }
 
@@ -678,9 +679,6 @@ static void vfio_remove(struct pci_dev *pdev)
 	/* wait for all closed */
 	wait_event(vdev->dev_idle_q, vdev->refcnt == 0);
 
-	pci_disable_device(pdev);
-
-	vfio_nl_freeclients(vdev);
 	device_destroy(vfio_class->class, vdev->devnum);
 	pci_set_drvdata(pdev, NULL);
 	kfree(vdev);
