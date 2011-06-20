@@ -74,7 +74,6 @@ struct vfio_dev {
 	wait_queue_head_t nl_wait_q;
 	u32		nl_reply_seq;
 	u32		nl_reply_value;
-	int			cachec;
 	struct msix_entry	*msix;
 	struct eventfd_ctx	*ev_irq;
 	struct eventfd_ctx	**ev_msi;
