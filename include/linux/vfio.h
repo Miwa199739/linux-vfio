@@ -183,39 +183,38 @@ struct vfio_dma_map {
 #define	VFIO_FLAG_WRITE		0x1	/* req writeable DMA mem */
 };
 
-/* map user pages at specific dma address */
-/* requires previous VFIO_DOMAIN_SET */
-#define	VFIO_DMA_MAP_IOVA	_IOWR(';', 101, struct vfio_dma_map)
+/* Map user pages at specific dma address.  Requires previous VFIO_DOMAIN_SET */
+#define	VFIO_MAP_DMA			_IOWR(';', 101, struct vfio_dma_map)
 
-/* unmap user pages */
-#define	VFIO_DMA_UNMAP		_IOW(';', 102, struct vfio_dma_map)
+/* Unmap user pages */
+#define	VFIO_UNMAP_DMA			_IOW(';', 102, struct vfio_dma_map)
 
-/* request IRQ interrupts; use given eventfd */
-#define	VFIO_EVENTFD_IRQ	_IOW(';', 103, int)
+/* Request IRQ interrupts; use given eventfd to signal userspace.
+ * Use fd < 0 to release IRQ.  Mutually exclusive with MSI enabled */
+#define	VFIO_SET_IRQ_EVENTFD		_IOW(';', 103, int)
 
-/* Request MSI interrupts: arg[0] is #, arg[1-n] are eventfds */
-#define	VFIO_EVENTFDS_MSI	_IOW(';', 104, int)
+/* Request MSI interrupts: arg[0] is #, arg[1-n] are eventfds.
+ * Use arg[0] = 0 to disable MSI.  Mutually exclusive with IRQ enabled */
+#define	VFIO_SET_MSI_EVENTFDS		_IOW(';', 104, int)
 
-/* Request MSI-X interrupts: arg[0] is #, arg[1-n] are eventfds */
-#define	VFIO_EVENTFDS_MSIX	_IOW(';', 105, int)
+/* Request MSI-X interrupts: arg[0] is #, arg[1-n] are eventfds
+ * Use arg[0] = 0 to disable MSI. */
+#define	VFIO_SET_MSIX_EVENTFDS		_IOW(';', 105, int)
 
 /* Get length of a BAR */
-#define	VFIO_BAR_LEN		_IOWR(';', 106, __u64)
+#define	VFIO_GET_BAR_LEN		_IOWR(';', 106, __u64)
 
-/* Set the IOMMU domain - arg is fd from uiommu driver */
-#define	VFIO_DOMAIN_SET		_IOW(';', 107, int)
-
-/* Unset the IOMMU domain */
-#define	VFIO_DOMAIN_UNSET	_IO(';', 108)
+/* Set the IOMMU domain - arg is fd from uiommu driver, fd < 0 to unset */
+#define	VFIO_SET_DOMAIN			_IOW(';', 107, int)
 
 /* Re-enable INTx */
-#define	VFIO_IRQ_EOI		_IO(';', 109)
+#define	VFIO_UNMASK_IRQ			_IO(';', 108)
 
-/* Re-enable INTx via eventfd */
-#define	VFIO_IRQ_EOI_EVENTFD	_IOW(';', 110, int)
+/* Re-enable INTx via eventfd, fd < 0 to disable */
+#define	VFIO_SET_UNMASK_IRQ_EVENTFD	_IOW(';', 109, int)
 
 /* Reset PCI function */
-#define VFIO_RESET_FUNCTION	_IO(';', 111)
+#define VFIO_RESET_FUNCTION		_IO(';', 110)
 
 /*
  * Reads, writes, and mmaps determine which PCI BAR (or config space)

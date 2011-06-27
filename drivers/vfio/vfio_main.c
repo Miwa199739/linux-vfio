@@ -371,7 +371,7 @@ static long vfio_unl_ioctl(struct file *filep,
 
 	switch (cmd) {
 
-	case VFIO_DMA_MAP_IOVA:
+	case VFIO_MAP_DMA:
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
 		ret = vfio_dma_map_dm(vdev->uiommu, &dm);
@@ -379,13 +379,13 @@ static long vfio_unl_ioctl(struct file *filep,
 			ret = -EFAULT;
 		break;
 
-	case VFIO_DMA_UNMAP:
+	case VFIO_UNMAP_DMA:
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
 		ret = vfio_dma_unmap_dm(vdev->uiommu, &dm);
 		break;
 
-	case VFIO_EVENTFD_IRQ:
+	case VFIO_SET_IRQ_EVENTFD:
 		if (get_user(fd, intargp))
 			return -EFAULT;
 		if (!pdev->irq)
@@ -416,7 +416,7 @@ static long vfio_unl_ioctl(struct file *filep,
 		mutex_unlock(&vdev->igate);
 		break;
 
-	case VFIO_EVENTFDS_MSI:
+	case VFIO_SET_MSI_EVENTFDS:
 		if (get_user(nfd, intargp))
 			return -EFAULT;
 		intargp++;
@@ -434,7 +434,7 @@ static long vfio_unl_ioctl(struct file *filep,
 		mutex_unlock(&vdev->igate);
 		break;
 
-	case VFIO_EVENTFDS_MSIX:
+	case VFIO_SET_MSIX_EVENTFDS:
 		if (get_user(nfd, intargp))
 			return -EFAULT;
 		intargp++;
@@ -448,7 +448,7 @@ static long vfio_unl_ioctl(struct file *filep,
 		mutex_unlock(&vdev->igate);
 		break;
 
-	case VFIO_BAR_LEN:
+	case VFIO_GET_BAR_LEN:
 		if (get_user(bar, u64argp))
 			return -EFAULT;
 		if (bar > PCI_ROM_RESOURCE)
@@ -461,21 +461,20 @@ static long vfio_unl_ioctl(struct file *filep,
 			return -EFAULT;
 		break;
 
-	case VFIO_DOMAIN_SET:
+	case VFIO_SET_DOMAIN:
 		if (get_user(fd, intargp))
 			return -EFAULT;
-		ret = vfio_domain_set(vdev, fd, allow_unsafe_intrs);
+		if (fd >= 0)
+			ret = vfio_domain_set(vdev, fd, allow_unsafe_intrs);
+		else
+			ret = vfio_domain_unset(vdev);
 		break;
 
-	case VFIO_DOMAIN_UNSET:
-		ret = vfio_domain_unset(vdev);
-		break;
-
-	case VFIO_IRQ_EOI:
+	case VFIO_UNMASK_IRQ:
 		ret = vfio_irq_eoi(vdev);
 		break;
 
-	case VFIO_IRQ_EOI_EVENTFD:
+	case VFIO_SET_UNMASK_IRQ_EVENTFD:
 		if (copy_from_user(&fd, uarg, sizeof fd))
 			return -EFAULT;
 		ret = vfio_irq_eoi_eventfd(vdev, fd);
