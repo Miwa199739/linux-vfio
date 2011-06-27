@@ -200,7 +200,7 @@ struct vfio_dma_map {
 #define	VFIO_EVENTFDS_MSIX	_IOW(';', 105, int)
 
 /* Get length of a BAR */
-#define	VFIO_BAR_LEN		_IOWR(';', 167, __u32)
+#define	VFIO_BAR_LEN		_IOWR(';', 106, __u64)
 
 /* Set the IOMMU domain - arg is fd from uiommu driver */
 #define	VFIO_DOMAIN_SET		_IOW(';', 107, int)

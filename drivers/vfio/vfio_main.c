@@ -359,11 +359,12 @@ static long vfio_unl_ioctl(struct file *filep,
 	struct vfio_dev *vdev = filep->private_data;
 	void __user *uarg = (void __user *)arg;
 	int __user *intargp = (void __user *)arg;
+	u64 __user *u64argp = (void __user *)arg;
 	struct pci_dev *pdev = vdev->pdev;
 	struct vfio_dma_map dm;
 	int ret = 0;
 	int fd, nfd;
-	int bar;
+	u64 bar;
 
 	if (!vdev)
 		return -EINVAL;
@@ -448,15 +449,15 @@ static long vfio_unl_ioctl(struct file *filep,
 		break;
 
 	case VFIO_BAR_LEN:
-		if (get_user(bar, intargp))
+		if (get_user(bar, u64argp))
 			return -EFAULT;
-		if (bar < 0 || bar > PCI_ROM_RESOURCE)
+		if (bar > PCI_ROM_RESOURCE)
 			return -EINVAL;
 		if (pci_resource_start(pdev, bar))
 			bar = pci_resource_len(pdev, bar);
 		else
 			bar = 0;
-		if (put_user(bar, intargp))
+		if (put_user(bar, u64argp))
 			return -EFAULT;
 		break;
 
