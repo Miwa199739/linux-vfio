@@ -667,7 +667,6 @@ err_get_devnum:
 static void vfio_remove(struct pci_dev *pdev)
 {
 	struct vfio_dev *vdev = pci_get_drvdata(pdev);
-	int ret;
 
 	/* prevent further opens */
 	vfio_free_minor(vdev);
@@ -675,7 +674,7 @@ static void vfio_remove(struct pci_dev *pdev)
 	vdev->remove_pending = true;
 
 	/* notify users */
-	ret = vfio_nl_remove(vdev);
+	vfio_nl_remove(vdev);
 
 	/* wait for all closed */
 	wait_event(vdev->dev_idle_q, vdev->refcnt == 0);
