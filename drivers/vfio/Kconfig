@@ -10,6 +10,7 @@ menuconfig VFIO
 
 menuconfig UIOMMU
 	tristate "User level manipulation of IOMMU"
+	depends on IOMMU_API
 	help
 	  Device driver to allow user level programs to
 	  manipulate IOMMU domains.
