@@ -153,7 +153,17 @@ ssize_t vfio_mem_readwrite(
 
 	if (!pci_resource_start(pdev, pci_space))
 		return -EINVAL;
-	 end = pci_resource_len(pdev, pci_space);
+
+	end = pci_resource_len(pdev, pci_space);
+
+	if (pos > end)
+		return -EINVAL;
+
+	if (pos == end)
+		return 0;
+
+	if (pos + count > end)
+		count = end - pos;
 
 	if (pci_space == PCI_ROM_RESOURCE) {
 		size_t size = end;
@@ -174,17 +184,6 @@ ssize_t vfio_mem_readwrite(
 	}
 	if (!io)
 		return -EINVAL;
-
-	if (pos > end) {
-		ret = -EINVAL;
-		goto out;
-	}
-	if (pos == end) {
-		ret = 0;
-		goto out;
-	}
-	if (pos + count > end)
-		count = end - pos;
 
 	ret = -EFAULT;
 
