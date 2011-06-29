@@ -140,6 +140,7 @@ int vfio_domain_unset(struct vfio_dev *);
 int vfio_class_init(void);
 void vfio_class_destroy(void);
 int vfio_dev_add_attributes(struct vfio_dev *);
+void vfio_dev_del_attributes(struct vfio_dev *);
 int vfio_build_config_map(struct vfio_dev *);
 int vfio_init_pci_perm_bits(void);
 void vfio_uninit_pci_perm_bits(void);
@@ -203,7 +204,7 @@ struct vfio_dma_map {
 #define	VFIO_SET_MSIX_EVENTFDS		_IOW(';', 105, int)
 
 /* Get length of a BAR */
-#define	VFIO_GET_BAR_LEN		_IOWR(';', 106, __u64)
+#define	VFIO_GET_BAR_LEN		_IOWR(';', 106, size_t)
 
 /* Set the IOMMU domain - arg is fd from uiommu driver, fd < 0 to unset */
 #define	VFIO_SET_DOMAIN			_IOW(';', 107, int)

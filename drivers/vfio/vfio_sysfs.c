@@ -115,3 +115,8 @@ int vfio_dev_add_attributes(struct vfio_dev *vdev)
 {
 	return sysfs_create_group(&vdev->dev->kobj, &vfio_attr_grp);
 }
+
+void vfio_dev_del_attributes(struct vfio_dev *vdev)
+{
+	sysfs_remove_group(&vdev->dev->kobj, &vfio_attr_grp);
+}

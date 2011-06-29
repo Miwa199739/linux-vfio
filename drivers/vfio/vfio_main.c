@@ -78,13 +78,12 @@ static DEFINE_MUTEX(vfio_minor_lock);
 /*
  * Does [a1,b1) overlap [a2,b2) ?
  */
-static inline int overlap(int a1, int b1, int a2, int b2)
+static inline int overlap(loff_t a1, loff_t b1, loff_t a2, loff_t b2)
 {
 	/*
 	 * Ranges overlap if they're not disjoint; and they're
 	 * disjoint if the end of one is before the start of
-	 rq
-* the other one.
+	 * the other one.
 	 */
 	return !(b2 <= a1 || b1 <= a2);
 }
@@ -198,7 +197,7 @@ static ssize_t vfio_read(struct file *filep, char __user *buf,
 {
 	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
-	u8 pci_space;
+	int pci_space;
 
 	pci_space = vfio_offset_to_pci_space(*ppos);
 
@@ -220,14 +219,14 @@ static ssize_t vfio_read(struct file *filep, char __user *buf,
 	return -EINVAL;
 }
 
-static int vfio_msix_check(struct vfio_dev *vdev, u64 start, u32 len)
+static int vfio_msix_check(struct vfio_dev *vdev, loff_t start, loff_t len)
 {
 	struct pci_dev *pdev = vdev->pdev;
 	u16 pos;
 	u32 table_offset;
 	u16 table_size;
 	u8 bir;
-	u32 lo, hi, startp, endp;
+	loff_t lo, hi, startp, endp;
 
 	pos = pci_find_capability(pdev, PCI_CAP_ID_MSIX);
 	if (!pos)
@@ -235,7 +234,7 @@ static int vfio_msix_check(struct vfio_dev *vdev, u64 start, u32 len)
 
 	pci_read_config_word(pdev, pos + PCI_MSIX_FLAGS, &table_size);
 	table_size = (table_size & PCI_MSIX_FLAGS_QSIZE) + 1;
-	pci_read_config_dword(pdev, pos + 4, &table_offset);
+	pci_read_config_dword(pdev, pos + PCI_MSIX_TABLE, &table_offset);
 	bir = table_offset & PCI_MSIX_FLAGS_BIRMASK;
 	lo = table_offset >> PAGE_SHIFT;
 	hi = (table_offset + PCI_MSIX_ENTRY_SIZE * table_size + PAGE_SIZE - 1)
@@ -256,16 +255,15 @@ static ssize_t vfio_write(struct file *filep, const char __user *buf,
 {
 	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
-	u8 pci_space;
-	int ret;
+	int pci_space, ret;
 
 	/* no writes until IOMMU domain set */
 	if (!vdev->uiommu)
 		return -EINVAL;
 	pci_space = vfio_offset_to_pci_space(*ppos);
 	if (pci_space == VFIO_PCI_CONFIG_RESOURCE)
-		return vfio_config_readwrite(1, vdev,
-					(char __user *)buf, count, ppos);
+		return vfio_config_readwrite(1, vdev, (char __user *)buf,
+					     count, ppos);
 	if (pci_space > PCI_ROM_RESOURCE)
 		return -EINVAL;
 	if (pci_resource_flags(pdev, pci_space) & IORESOURCE_IO)
@@ -278,8 +276,8 @@ static ssize_t vfio_write(struct file *filep, const char __user *buf,
 			if (ret)
 				return ret;
 		}
-		return vfio_mem_readwrite(1, vdev,
-				(char __user *)buf, count, ppos);
+		return vfio_mem_readwrite(1, vdev, (char __user *)buf,
+					  count, ppos);
 	}
 	return -EINVAL;
 }
@@ -288,12 +286,8 @@ static int vfio_mmap(struct file *filep, struct vm_area_struct *vma)
 {
 	struct vfio_dev *vdev = filep->private_data;
 	struct pci_dev *pdev = vdev->pdev;
-	unsigned long requested, actual;
-	int pci_space;
-	u64 start;
-	u32 len;
-	unsigned long phys;
-	int ret;
+	unsigned long requested, actual, start, phys;
+	int pci_space, ret;
 
 	/* no reads or writes until IOMMU domain set */
 	if (!vdev->uiommu)
@@ -332,12 +326,11 @@ static int vfio_mmap(struct file *filep, struct vm_area_struct *vma)
 	}
 
 	start = vma->vm_pgoff << PAGE_SHIFT;
-	len = vma->vm_end - vma->vm_start;
 	if (allow_unsafe_intrs && (vma->vm_flags & VM_WRITE)) {
 		/*
 		 * Deter users from screwing up MSI-X intrs
 		 */
-		ret = vfio_msix_check(vdev, start, len);
+		ret = vfio_msix_check(vdev, start, vma->vm_end - vma->vm_start);
 		if (ret)
 			return ret;
 	}
@@ -359,12 +352,11 @@ static long vfio_unl_ioctl(struct file *filep,
 	struct vfio_dev *vdev = filep->private_data;
 	void __user *uarg = (void __user *)arg;
 	int __user *intargp = (void __user *)arg;
-	u64 __user *u64argp = (void __user *)arg;
+	size_t __user *sizeargp = (void __user *)arg;
 	struct pci_dev *pdev = vdev->pdev;
 	struct vfio_dma_map dm;
-	int ret = 0;
-	int fd, nfd;
-	u64 bar;
+	int fd, nfd, ret = 0;
+	size_t bar;
 
 	if (!vdev)
 		return -EINVAL;
@@ -397,22 +389,25 @@ static long vfio_unl_ioctl(struct file *filep,
 			vdev->irq_disabled = false;
 			vdev->ev_irq = NULL;
 		}
+		if (fd < 0)
+			goto igate_unlock;
+
 		if (vdev->ev_msi) {	/* irq and msi both use pdev->irq */
 			ret = -EINVAL;
-		} else {
-			if (fd >= 0) {
-				vdev->ev_irq = eventfd_ctx_fdget(fd);
-				if (vdev->ev_irq) {
-					ret = request_irq(pdev->irq,
-						vfio_interrupt,
-						vdev->pci_2_3 ? IRQF_SHARED : 0,
-						vdev->name, vdev);
-					if (vdev->virq_disabled)
-						vfio_disable_intx(vdev);
-				} else
-					ret = -EINVAL;
-			}
+			goto igate_unlock;
 		}
+
+		vdev->ev_irq = eventfd_ctx_fdget(fd);
+		if (!vdev->ev_irq) {
+			ret = -EINVAL;
+			goto igate_unlock;
+		}
+		ret = request_irq(pdev->irq, vfio_interrupt, vdev->pci_2_3 ?
+				  IRQF_SHARED : 0, vdev->name, vdev);
+		if (vdev->virq_disabled)
+			vfio_disable_intx(vdev);
+
+igate_unlock:
 		mutex_unlock(&vdev->igate);
 		break;
 
@@ -449,7 +444,7 @@ static long vfio_unl_ioctl(struct file *filep,
 		break;
 
 	case VFIO_GET_BAR_LEN:
-		if (get_user(bar, u64argp))
+		if (get_user(bar, sizeargp))
 			return -EFAULT;
 		if (bar > PCI_ROM_RESOURCE)
 			return -EINVAL;
@@ -457,7 +452,7 @@ static long vfio_unl_ioctl(struct file *filep,
 			bar = pci_resource_len(pdev, bar);
 		else
 			bar = 0;
-		if (put_user(bar, u64argp))
+		if (put_user(bar, sizeargp))
 			return -EFAULT;
 		break;
 
@@ -515,36 +510,40 @@ static const struct file_operations vfio_fops = {
 
 static int vfio_get_devnum(struct vfio_dev *vdev)
 {
-	int retval = -ENOMEM;
-	int id;
+	int id, ret;
+
+retry:
+	if (unlikely(idr_pre_get(&vfio_idr, GFP_KERNEL) == 0))
+		return -ENOMEM;
 
 	mutex_lock(&vfio_minor_lock);
-	if (idr_pre_get(&vfio_idr, GFP_KERNEL) == 0)
-		goto exit;
 
-	retval = idr_get_new(&vfio_idr, vdev, &id);
-	if (retval < 0) {
-		if (retval == -EAGAIN)
-			retval = -ENOMEM;
-		goto exit;
+	if (vfio_major < 0) {
+		vfio_major = register_chrdev(0, "vfio", &vfio_fops);
+		if (vfio_major < 0) {
+			mutex_unlock(&vfio_minor_lock);
+			return vfio_major;
+		}
 	}
-	if (id > MINORMASK) {
+	
+	ret = idr_get_new(&vfio_idr, vdev, &id);
+	if (ret == 0 && id > MINORMASK) {
 		idr_remove(&vfio_idr, id);
-		retval = -ENOMEM;
+		ret = -ENOSPC;
+	} 
+
+	mutex_unlock(&vfio_minor_lock);
+
+	if (ret < 0) {
+		if (ret == -EAGAIN)
+			goto retry;
+		return ret;
 	}
+
 	if (id > vfio_max_minor)
 		vfio_max_minor = id;
-	if (vfio_major < 0) {
-		retval = register_chrdev(0, "vfio", &vfio_fops);
-		if (retval < 0)
-			goto exit;
-		vfio_major = retval;
-	}
 
-	retval = MKDEV(vfio_major, id);
-exit:
-	mutex_unlock(&vfio_minor_lock);
-	return retval;
+	return MKDEV(vfio_major, id);
 }
 
 int vfio_validate(struct vfio_dev *vdev)
@@ -621,8 +620,8 @@ static int vfio_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	vdev = kzalloc(sizeof(struct vfio_dev), GFP_KERNEL);
 	if (!vdev)
 		return -ENOMEM;
-	vdev->pdev = pdev;
 
+	vdev->pdev = pdev;
 	vdev->pci_2_3 = (verify_pci_2_3(pdev) == 0);
 
 	mutex_init(&vdev->vgate);
@@ -641,7 +640,7 @@ static int vfio_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	sprintf(vdev->name, "vfio%d", MINOR(vdev->devnum));
 	pci_set_drvdata(pdev, vdev);
 	vdev->dev = device_create(vfio_class->class, &pdev->dev,
-			  vdev->devnum, vdev, vdev->name);
+				  vdev->devnum, vdev, vdev->name);
 	if (IS_ERR(vdev->dev)) {
 		printk(KERN_ERR "VFIO: device register failed\n");
 		err = PTR_ERR(vdev->dev);
@@ -678,6 +677,7 @@ static void vfio_remove(struct pci_dev *pdev)
 	/* wait for all closed */
 	wait_event(vdev->dev_idle_q, vdev->refcnt == 0);
 
+	vfio_dev_del_attributes(vdev);
 	device_destroy(vfio_class->class, vdev->devnum);
 	pci_set_drvdata(pdev, NULL);
 	kfree(vdev);
@@ -694,9 +694,9 @@ static struct pci_error_handlers vfio_error_handlers = {
 static struct pci_driver driver = {
 	.name		= "vfio",
 	.id_table	= NULL, /* only dynamic id's */
-	.probe		 = vfio_probe,
-	.remove		 = vfio_remove,
-	.err_handler	 = &vfio_error_handlers,
+	.probe		= vfio_probe,
+	.remove		= vfio_remove,
+	.err_handler	= &vfio_error_handlers,
 };
 
 static atomic_t vfio_pm_suspend_count;
@@ -712,7 +712,6 @@ static int vfio_pm_suspend(void)
 {
 	struct vfio_dev *vdev;
 	int id, alive = 0;
-	int ret;
 
 	mutex_lock(&vfio_minor_lock);
 	atomic_set(&vfio_pm_suspend_count, 0);
@@ -724,8 +723,7 @@ static int vfio_pm_suspend(void)
 		if (vdev->refcnt == 0)
 			continue;
 		alive++;
-		ret = vfio_nl_upcall(vdev, VFIO_MSG_PM_SUSPEND, 0, 0);
-		if (ret == 0)
+		if (vfio_nl_upcall(vdev, VFIO_MSG_PM_SUSPEND, 0, 0) == 0)
 			atomic_inc(&vfio_pm_suspend_count);
 	}
 	mutex_unlock(&vfio_minor_lock);
@@ -754,7 +752,7 @@ static int vfio_pm_resume(void)
 			continue;
 		if (vdev->refcnt == 0)
 			continue;
-		(void) vfio_nl_upcall(vdev, VFIO_MSG_PM_RESUME, 0, 0);
+		vfio_nl_upcall(vdev, VFIO_MSG_PM_RESUME, 0, 0);
 	}
 	mutex_unlock(&vfio_minor_lock);
 	return NOTIFY_DONE;
@@ -771,8 +769,8 @@ void vfio_pm_process_reply(int reply)
 		wake_up(&vfio_pm_wait_q);
 }
 
-static int vfio_pm_notify(struct notifier_block *this, unsigned long event,
-	void *notused)
+static int vfio_pm_notify(struct notifier_block *this,
+			  unsigned long event, void *notused)
 {
 	switch (event) {
 	case PM_HIBERNATION_PREPARE:
