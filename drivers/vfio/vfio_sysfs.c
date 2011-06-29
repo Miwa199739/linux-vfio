@@ -49,7 +49,7 @@ int vfio_class_init(void)
 
 	if (vfio_class) {
 		kref_get(&vfio_class->kref);
-		goto exit;
+		return 0;
 	}
 
 	vfio_class = kzalloc(sizeof(*vfio_class), GFP_KERNEL);
@@ -71,7 +71,6 @@ err_class_create:
 	kfree(vfio_class);
 	vfio_class = NULL;
 err_kzalloc:
-exit:
 	return ret;
 }
 

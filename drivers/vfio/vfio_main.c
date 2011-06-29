@@ -792,30 +792,68 @@ static struct notifier_block vfio_pm_nb = {
 	.notifier_call = vfio_pm_notify,
 };
 
-static int __init init(void)
-{
-	pr_info(DRIVER_DESC " version: " DRIVER_VERSION "\n");
-	vfio_init_pci_perm_bits();
-	vfio_class_init();
-	vfio_nl_init();
-	register_pm_notifier(&vfio_pm_nb);
-	vfio_eoi_module_init();
-	return pci_register_driver(&driver);
-}
 
 static void __exit cleanup(void)
 {
 	if (vfio_major >= 0)
 		unregister_chrdev(vfio_major, "vfio");
+
 	pci_unregister_driver(&driver);
-	vfio_eoi_module_exit();
+	vfio_eoi_eventfd_exit();
 	unregister_pm_notifier(&vfio_pm_nb);
 	vfio_nl_exit();
 	vfio_class_destroy();
+	vfio_uninit_pci_perm_bits();
 }
 
-module_init(init);
+static int __init init(void)
+{
+	int ret;
+
+	pr_info(DRIVER_DESC " version: " DRIVER_VERSION "\n");
+
+	ret = vfio_init_pci_perm_bits();
+	if (ret)
+		return ret;
+
+	ret = vfio_class_init();
+	if (ret)
+		goto err_class;
+
+	ret = vfio_nl_init();
+	if (ret)
+		goto err_nl;
+
+	ret = register_pm_notifier(&vfio_pm_nb);
+	if (ret)
+		goto err_pm;
+
+	ret = vfio_eoi_eventfd_init();
+	if (ret)
+		goto err_eoi;
+
+	ret = pci_register_driver(&driver);
+	if (ret)
+		goto err_pci;
+
+	return 0;
+
+err_pci:
+	vfio_eoi_eventfd_exit();
+err_eoi:
+	unregister_pm_notifier(&vfio_pm_nb);
+err_pm:
+	vfio_nl_exit();
+err_nl:
+	vfio_class_destroy();
+err_class:
+	vfio_uninit_pci_perm_bits();
+
+	return ret;
+}
+
 module_exit(cleanup);
+module_init(init);
 
 MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL v2");

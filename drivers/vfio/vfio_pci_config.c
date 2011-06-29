@@ -131,6 +131,14 @@ static struct perm_bits pci_ext_cap_perms[PCI_EXT_CAP_ID_MAX+1];
 #define	NO_WRITE	0
 #define	ALL_WRITE	0xFFFFFFFFU
 
+static void free_perm_bits(struct perm_bits *perm)
+{
+	kfree(perm->virt);
+	kfree(perm->write);
+	perm->virt = NULL;
+	perm->write = NULL;
+}
+
 static int alloc_perm_bits(struct perm_bits *perm, int sz)
 {
 	/*
@@ -140,10 +148,7 @@ static int alloc_perm_bits(struct perm_bits *perm, int sz)
 	perm->virt = kzalloc(sz, GFP_KERNEL);
 	perm->write = kzalloc(sz, GFP_KERNEL);
 	if (!perm->virt || !perm->write) {
-		kfree(perm->virt);
-		kfree(perm->write);
-		perm->virt = NULL;
-		perm->write = NULL;
+		free_perm_bits(perm);
 		return -ENOMEM;
 	}
 	return 0;
@@ -333,20 +338,41 @@ static int __init init_pci_ext_cap_pwr_perm(struct perm_bits *perm)
 /*
  * Initialize the shared permission tables
  */
-void __init vfio_init_pci_perm_bits(void)
+void __exit vfio_uninit_pci_perm_bits(void)
 {
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_BASIC]);
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_PM]);
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_VPD]);
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_PCIX]);
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_EXP]);
+	free_perm_bits(&pci_cap_perms[PCI_CAP_ID_AF]);
+	free_perm_bits(&pci_ext_cap_perms[PCI_EXT_CAP_ID_ERR]);
+	free_perm_bits(&pci_ext_cap_perms[PCI_EXT_CAP_ID_PWR]);
+}
+
+int __init vfio_init_pci_perm_bits(void)
+{
+	int ret;
+
 	/* basic config space */
-	init_pci_cap_basic_perm(&pci_cap_perms[PCI_CAP_ID_BASIC]);
+	ret = init_pci_cap_basic_perm(&pci_cap_perms[PCI_CAP_ID_BASIC]);
 	/* capabilities */
-	init_pci_cap_pm_perm(&pci_cap_perms[PCI_CAP_ID_PM]);
-	init_pci_cap_vpd_perm(&pci_cap_perms[PCI_CAP_ID_VPD]);
-	init_pci_cap_pcix_perm(&pci_cap_perms[PCI_CAP_ID_PCIX]);
-	init_pci_cap_exp_perm(&pci_cap_perms[PCI_CAP_ID_EXP]);
-	init_pci_cap_msix_perm(&pci_cap_perms[PCI_CAP_ID_MSIX]);
-	init_pci_cap_af_perm(&pci_cap_perms[PCI_CAP_ID_AF]);
+	ret |= init_pci_cap_pm_perm(&pci_cap_perms[PCI_CAP_ID_PM]);
+	ret |= init_pci_cap_vpd_perm(&pci_cap_perms[PCI_CAP_ID_VPD]);
+	ret |= init_pci_cap_pcix_perm(&pci_cap_perms[PCI_CAP_ID_PCIX]);
+	ret |= init_pci_cap_exp_perm(&pci_cap_perms[PCI_CAP_ID_EXP]);
+	ret |= init_pci_cap_msix_perm(&pci_cap_perms[PCI_CAP_ID_MSIX]);
+	ret |= init_pci_cap_af_perm(&pci_cap_perms[PCI_CAP_ID_AF]);
 	/* extended capabilities */
-	init_pci_ext_cap_err_perm(&pci_ext_cap_perms[PCI_EXT_CAP_ID_ERR]);
-	init_pci_ext_cap_pwr_perm(&pci_ext_cap_perms[PCI_EXT_CAP_ID_PWR]);
+	ret |= init_pci_ext_cap_err_perm(
+		&pci_ext_cap_perms[PCI_EXT_CAP_ID_ERR]);
+	ret |= init_pci_ext_cap_pwr_perm(
+		&pci_ext_cap_perms[PCI_EXT_CAP_ID_PWR]);
+
+	if (ret)
+		vfio_uninit_pci_perm_bits();
+
+	return ret;
 }
 
 /*

@@ -301,7 +301,7 @@ int vfio_irq_eoi_eventfd(struct vfio_dev *vdev, int fd)
 	return vfio_irq_eoi_eventfd_enable(vdev, fd);
 }
 
-int __init vfio_eoi_module_init(void)
+int __init vfio_eoi_eventfd_init(void)
 {
 	eoi_cleanup_wq = create_singlethread_workqueue("vfio-eoi-cleanup");
 	if (!eoi_cleanup_wq)
@@ -310,7 +310,7 @@ int __init vfio_eoi_module_init(void)
 	return 0;
 }
 
-void __exit vfio_eoi_module_exit(void)
+void __exit vfio_eoi_eventfd_exit(void)
 {
 	destroy_workqueue(eoi_cleanup_wq);
 }

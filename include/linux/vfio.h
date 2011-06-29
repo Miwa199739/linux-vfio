@@ -141,7 +141,8 @@ int vfio_class_init(void);
 void vfio_class_destroy(void);
 int vfio_dev_add_attributes(struct vfio_dev *);
 int vfio_build_config_map(struct vfio_dev *);
-void vfio_init_pci_perm_bits(void);
+int vfio_init_pci_perm_bits(void);
+void vfio_uninit_pci_perm_bits(void);
 
 int vfio_nl_init(void);
 void vfio_nl_freeclients(struct vfio_dev *);
@@ -161,8 +162,8 @@ void vfio_error_resume(struct pci_dev *);
 irqreturn_t vfio_interrupt(int, void *);
 int vfio_irq_eoi(struct vfio_dev *);
 int vfio_irq_eoi_eventfd(struct vfio_dev *, int);
-int vfio_eoi_module_init(void);
-void vfio_eoi_module_exit(void);
+int vfio_eoi_eventfd_init(void);
+void vfio_eoi_eventfd_exit(void);
 irqreturn_t vfio_disable_intx(struct vfio_dev *vdev);
 void vfio_enable_intx(struct vfio_dev *vdev);
 
