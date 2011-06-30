@@ -49,15 +49,13 @@ static struct genl_family vfio_nl_family = {
 static struct sk_buff *vfio_nl_create(u8 req)
 {
 	static atomic_t seq;
-	void *hdr;
 	struct sk_buff *msg = nlmsg_new(NLMSG_GOODSIZE, GFP_ATOMIC);
 
 	if (!msg)
 		return NULL;
 
-	hdr = genlmsg_put(msg, 0, atomic_add_return(1, &seq),
-			  &vfio_nl_family, 0, req);
-	if (!hdr) {
+	if (!genlmsg_put(msg, 0, atomic_add_return(1, &seq),
+			 &vfio_nl_family, 0, req)) {	
 		nlmsg_free(msg);
 		return NULL;
 	}
@@ -75,80 +73,45 @@ static struct sk_buff *vfio_nl_create(u8 req)
 static int vfio_nl_mcast(struct vfio_dev *vdev, struct sk_buff *msg, u8 type)
 {
 	struct list_head *pos;
-	struct vfio_nl_client *nlc;
-	struct sk_buff *skb;
-	/* XXX: nlh is right at the start of msg */
-	void *hdr = genlmsg_data(NLMSG_DATA(msg->data));
-	int good = 0;
-	int rc;
+	int ret = 0, tosend = 0, sent = 0;
 
-	if (genlmsg_end(msg, hdr) < 0) {
+	if (genlmsg_end(msg, genlmsg_data(NLMSG_DATA(msg->data))) < 0) {
 		nlmsg_free(msg);
 		return -ENOBUFS;
 	}
 
 	mutex_lock(&vdev->ngate);
 	list_for_each(pos, &vdev->nlc_list) {
+		struct vfio_nl_client *nlc;
 		nlc = list_entry(pos, struct vfio_nl_client, list);
 		if (nlc->msgcap & (1LL << type)) {
+			struct sk_buff *skb;
+
+			tosend++;
+
 			skb = skb_copy(msg, GFP_KERNEL);
 			if (!skb)  {
-				rc = -ENOBUFS;
+				ret = -ENOBUFS;
 				goto out;
 			}
-			rc = genlmsg_unicast(nlc->net, skb, nlc->pid);
-			if (rc == 0)
-				good++;
+
+			ret = genlmsg_unicast(nlc->net, skb, nlc->pid);
+			if (ret == 0)
+				sent++;
 		}
 	}
-	rc = 0;
 out:
 	mutex_unlock(&vdev->ngate);
 	nlmsg_free(msg);
-	if (good)
-		return good;
-	return rc;
+
+	if (!tosend || tosend != sent)
+		return -ENOTTY;
+	return ret;
 }
-
-#ifdef notdef
-struct sk_buff *vfio_nl_new_reply(struct genl_info *info,
-		int flags, u8 req)
-{
-	void *hdr;
-	struct sk_buff *msg = nlmsg_new(NLMSG_GOODSIZE, GFP_ATOMIC);
-
-	if (!msg)
-		return NULL;
-
-	hdr = genlmsg_put_reply(msg, info,
-			&vfio_nl_family, flags, req);
-	if (!hdr) {
-		nlmsg_free(msg);
-		return NULL;
-	}
-
-	return msg;
-}
-
-int vfio_nl_reply(struct sk_buff *msg, struct genl_info *info)
-{
-	/* XXX: nlh is right at the start of msg */
-	void *hdr = genlmsg_data(NLMSG_DATA(msg->data));
-
-	if (genlmsg_end(msg, hdr) < 0)
-		goto out;
-
-	return genlmsg_reply(msg, info);
-out:
-	nlmsg_free(msg);
-	return -ENOBUFS;
-}
-#endif
-
 
 static const struct nla_policy vfio_nl_reg_policy[VFIO_NL_ATTR_MAX+1] = {
 	[VFIO_ATTR_MSGCAP]	= { .type = NLA_U64 },
-	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
+	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U16 },
 	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
@@ -156,20 +119,20 @@ static const struct nla_policy vfio_nl_reg_policy[VFIO_NL_ATTR_MAX+1] = {
 
 static struct vfio_dev *vfio_nl_get_vdev(struct genl_info *info)
 {
-	u32 domain;
+	u16 domain;
 	u8 bus, slot, func;
-	u16 devfn;
 	struct pci_dev *pdev;
 	struct vfio_dev *vdev;
 
-	domain = nla_get_u32(info->attrs[VFIO_ATTR_PCI_DOMAIN]);
+	domain = nla_get_u16(info->attrs[VFIO_ATTR_PCI_DOMAIN]);
 	bus = nla_get_u8(info->attrs[VFIO_ATTR_PCI_BUS]);
 	slot = nla_get_u8(info->attrs[VFIO_ATTR_PCI_SLOT]);
 	func = nla_get_u8(info->attrs[VFIO_ATTR_PCI_FUNC]);
-	devfn = PCI_DEVFN(slot, func);
-	pdev = pci_get_domain_bus_and_slot(domain, bus, devfn);
+
+	pdev = pci_get_domain_bus_and_slot(domain, bus, PCI_DEVFN(slot, func));
 	if (!pdev)
 		return NULL;
+
 	vdev = pci_get_drvdata(pdev);
 	if (!vdev)
 		return NULL;
@@ -187,14 +150,13 @@ static struct vfio_dev *vfio_nl_get_vdev(struct genl_info *info)
 static int vfio_nl_user_register(struct sk_buff *skb, struct genl_info *info)
 {
 	u64 msgcap;
+	struct vfio_dev *vdev;
 	struct list_head *pos;
 	struct vfio_nl_client *nlc;
-	int rc = 0;
-	struct vfio_dev *vdev;
+	int ret = 0;
 
 	msgcap = nla_get_u64(info->attrs[VFIO_ATTR_MSGCAP]);
-	if (msgcap == 0)
-		return -EINVAL;
+
 	vdev = vfio_nl_get_vdev(info);
 	if (!vdev)
 		return -EINVAL;
@@ -206,24 +168,31 @@ static int vfio_nl_user_register(struct sk_buff *skb, struct genl_info *info)
 		    nlc->net == info->_net)	/* already here */
 			goto update;
 	}
+	if (!msgcap)
+		return -EINVAL;
+
 	nlc = kzalloc(sizeof(struct vfio_nl_client), GFP_KERNEL);
 	if (!nlc) {
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		goto out;
 	}
 	nlc->pid = info->snd_pid;
 	nlc->net = info->_net;
 	list_add(&nlc->list, &vdev->nlc_list);
 update:
-	nlc->msgcap = msgcap;
+	if (!msgcap) {
+		list_del(&nlc->list);
+		kfree(nlc);
+	} else
+		nlc->msgcap = msgcap;
 out:
 	mutex_unlock(&vdev->ngate);
-	return rc;
+	return ret;
 }
 
-static const struct nla_policy vfio_nl_err_policy[VFIO_NL_ATTR_MAX+1] = {
+static const struct nla_policy vfio_nl_err_policy[VFIO_NL_ATTR_MAX + 1] = {
 	[VFIO_ATTR_ERROR_HANDLING_REPLY] = { .type = NLA_U32 },
-	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
+	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U16 },
 	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
@@ -239,6 +208,7 @@ static int vfio_nl_error_handling_reply(struct sk_buff *skb,
 	vdev = vfio_nl_get_vdev(info);
 	if (!vdev)
 		return -EINVAL;
+
 	seq = nlmsg_hdr(skb)->nlmsg_seq;
 	if (seq > vdev->nl_reply_seq) {
 		vdev->nl_reply_value = value;
@@ -248,9 +218,9 @@ static int vfio_nl_error_handling_reply(struct sk_buff *skb,
 	return 0;
 }
 
-static const struct nla_policy vfio_nl_pm_policy[VFIO_NL_ATTR_MAX+1] = {
+static const struct nla_policy vfio_nl_pm_policy[VFIO_NL_ATTR_MAX + 1] = {
 	[VFIO_ATTR_PM_SUSPEND_REPLY] = { .type = NLA_U32 },
-	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U32 },
+	[VFIO_ATTR_PCI_DOMAIN]	= { .type = NLA_U16 },
 	[VFIO_ATTR_PCI_BUS]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_SLOT]	= { .type = NLA_U8 },
 	[VFIO_ATTR_PCI_FUNC]	= { .type = NLA_U8 },
@@ -263,10 +233,9 @@ static int vfio_nl_pm_suspend_reply(struct sk_buff *skb, struct genl_info *info)
 
 	value = nla_get_u32(info->attrs[VFIO_ATTR_PM_SUSPEND_REPLY]);
 	vdev = vfio_nl_get_vdev(info);
-	if (!vdev)
+	if (!vdev || !vdev->refcnt)
 		return -EINVAL;
-	if (vdev->refcnt == 0)
-		return -EINVAL;
+
 	vfio_pm_process_reply(value);
 	return 0;
 }
@@ -305,26 +274,26 @@ static struct genl_ops vfio_nl_pm_ops = {
 
 int vfio_nl_init(void)
 {
-	int rc;
+	int ret;
 
-	rc = genl_register_family(&vfio_nl_family);
-	if (rc)
+	ret = genl_register_family(&vfio_nl_family);
+	if (ret)
 		goto fail;
 
-	rc = genl_register_ops(&vfio_nl_family, &vfio_nl_reg_ops);
-	if (rc < 0)
+	ret = genl_register_ops(&vfio_nl_family, &vfio_nl_reg_ops);
+	if (ret < 0)
 		goto fail;
-	rc = genl_register_ops(&vfio_nl_family, &vfio_nl_err_ops);
-	if (rc < 0)
+	ret = genl_register_ops(&vfio_nl_family, &vfio_nl_err_ops);
+	if (ret < 0)
 		goto fail;
-	rc = genl_register_ops(&vfio_nl_family, &vfio_nl_pm_ops);
-	if (rc < 0)
+	ret = genl_register_ops(&vfio_nl_family, &vfio_nl_pm_ops);
+	if (ret < 0)
 		goto fail;
 	return 0;
 
 fail:
 	genl_unregister_family(&vfio_nl_family);
-	return rc;
+	return ret;
 }
 
 void vfio_nl_exit(void)
@@ -336,21 +305,17 @@ int vfio_nl_remove(struct vfio_dev *vdev)
 {
 	struct pci_dev *pdev = vdev->pdev;
 	struct sk_buff *msg;
-	int rc;
 
 	msg = vfio_nl_create(VFIO_MSG_REMOVE);
 	if (!msg)
 		return -ENOBUFS;
 
-	NLA_PUT_U32(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
+	NLA_PUT_U16(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_SLOT, PCI_SLOT(pdev->devfn));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_FUNC, PCI_FUNC(pdev->devfn));
 
-	rc = vfio_nl_mcast(vdev, msg, VFIO_MSG_REMOVE);
-	if (rc > 0)
-		rc = 0;
-	return rc;
+	return vfio_nl_mcast(vdev, msg, VFIO_MSG_REMOVE);
 
 nla_put_failure:
 	nlmsg_free(msg);
@@ -365,10 +330,11 @@ int vfio_nl_upcall(struct vfio_dev *vdev, u8 type, int state, int waitret)
 
 	msg = vfio_nl_create(type);
 	if (!msg)
-		goto null_out;
+		return -1;
+
 	seq = nlmsg_hdr(msg)->nlmsg_seq;
 
-	NLA_PUT_U32(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
+	NLA_PUT_U16(msg, VFIO_ATTR_PCI_DOMAIN, pci_domain_nr(pdev->bus));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_BUS, pdev->bus->number);
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_SLOT, PCI_SLOT(pdev->devfn));
 	NLA_PUT_U8(msg, VFIO_ATTR_PCI_FUNC, PCI_FUNC(pdev->devfn));
@@ -376,39 +342,39 @@ int vfio_nl_upcall(struct vfio_dev *vdev, u8 type, int state, int waitret)
 	if (type == VFIO_MSG_ERROR_DETECTED)
 		NLA_PUT_U32(msg, VFIO_ATTR_CHANNEL_STATE, state);
 
-	if (vfio_nl_mcast(vdev, msg, type) <= 0)
-		goto null_out;
+	if (vfio_nl_mcast(vdev, msg, type))
+		return -1;
+
 	if (!waitret)
 		return 0;
 
 	/* sleep for reply */
 	if (wait_event_interruptible_timeout(vdev->nl_wait_q,
-	    (vdev->nl_reply_seq >= seq), VFIO_ERROR_REPLY_TIMEOUT) <= 0) {
+					     (vdev->nl_reply_seq >= seq),
+					     VFIO_ERROR_REPLY_TIMEOUT) <= 0) {
 		printk(KERN_ERR "vfio upcall timeout\n");
-		goto null_out;
+		return -1;
 	}
 	if (seq != vdev->nl_reply_seq)
-		goto null_out;
+		return -1;
+
 	return vdev->nl_reply_value;
 
 nla_put_failure:
 	nlmsg_free(msg);
-null_out:
 	return -1;
 }
 
 /* the following routines invoked for pci error handling */
 
 pci_ers_result_t vfio_error_detected(struct pci_dev *pdev,
-					pci_channel_state_t state)
+				     pci_channel_state_t state)
 {
 	struct vfio_dev *vdev = pci_get_drvdata(pdev);
 	int ret;
 
 	ret = vfio_nl_upcall(vdev, VFIO_MSG_ERROR_DETECTED, (int)state, 1);
-	if (ret >= 0)
-		return ret;
-	return PCI_ERS_RESULT_NONE;
+	return ret >= 0 ? ret : PCI_ERS_RESULT_NONE;
 }
 
 pci_ers_result_t vfio_mmio_enabled(struct pci_dev *pdev)
@@ -417,9 +383,7 @@ pci_ers_result_t vfio_mmio_enabled(struct pci_dev *pdev)
 	int ret;
 
 	ret = vfio_nl_upcall(vdev, VFIO_MSG_MMIO_ENABLED, 0, 1);
-	if (ret >= 0)
-		return ret;
-	return PCI_ERS_RESULT_NONE;
+	return ret >= 0 ? ret : PCI_ERS_RESULT_NONE;
 }
 
 pci_ers_result_t vfio_link_reset(struct pci_dev *pdev)
@@ -428,9 +392,7 @@ pci_ers_result_t vfio_link_reset(struct pci_dev *pdev)
 	int ret;
 
 	ret = vfio_nl_upcall(vdev, VFIO_MSG_LINK_RESET, 0, 1);
-	if (ret >= 0)
-		return ret;
-	return PCI_ERS_RESULT_NONE;
+	return ret >= 0 ? ret : PCI_ERS_RESULT_NONE;
 }
 
 pci_ers_result_t vfio_slot_reset(struct pci_dev *pdev)
@@ -439,14 +401,12 @@ pci_ers_result_t vfio_slot_reset(struct pci_dev *pdev)
 	int ret;
 
 	ret = vfio_nl_upcall(vdev, VFIO_MSG_SLOT_RESET, 0, 1);
-	if (ret >= 0)
-		return ret;
-	return PCI_ERS_RESULT_NONE;
+	return ret >= 0 ? ret : PCI_ERS_RESULT_NONE;
 }
 
 void vfio_error_resume(struct pci_dev *pdev)
 {
 	struct vfio_dev *vdev = pci_get_drvdata(pdev);
 
-	(void) vfio_nl_upcall(vdev, VFIO_MSG_ERROR_RESUME, 0, 0);
+	vfio_nl_upcall(vdev, VFIO_MSG_ERROR_RESUME, 0, 0);
 }
