@@ -71,7 +71,6 @@ MODULE_PARM_DESC(allow_unsafe_intrs,
 
 static int vfio_major = -1;
 static DEFINE_IDR(vfio_idr);
-static int vfio_max_minor;
 /* Protect idr accesses */
 static DEFINE_MUTEX(vfio_minor_lock);
 
@@ -540,25 +539,23 @@ retry:
 		return ret;
 	}
 
-	if (id > vfio_max_minor)
-		vfio_max_minor = id;
-
 	return MKDEV(vfio_major, id);
+}
+
+static int vfio_idr_match(int id, void *p, void *data)
+{
+	return p == data;
 }
 
 int vfio_validate(struct vfio_dev *vdev)
 {
-	int rc = 0;
-	int id;
+	int found;
 
 	mutex_lock(&vfio_minor_lock);
-	for (id = 0; id <= vfio_max_minor; id++)
-		if (vdev == idr_find(&vfio_idr, id))
-			goto out;
-	rc = 1;
-out:
+	found = idr_for_each(&vfio_idr, vfio_idr_match, vdev);
 	mutex_unlock(&vfio_minor_lock);
-	return rc;
+
+	return !found;
 }
 
 static void vfio_free_minor(struct vfio_dev *vdev)
@@ -699,10 +696,23 @@ static struct pci_driver driver = {
 	.err_handler	= &vfio_error_handlers,
 };
 
-static atomic_t vfio_pm_suspend_count;
+static atomic_t vfio_pm_notifies;
 static int vfio_pm_suspend_result;
 static DECLARE_WAIT_QUEUE_HEAD(vfio_pm_wait_q);
 
+static int vfio_nl_pm_suspend_notify(int id, void *p, void *data)
+{
+	struct vfio_dev *vdev = p;
+	int ret = 0;
+
+	if (vdev->refcnt) {
+		ret = vfio_nl_upcall(vdev, VFIO_MSG_PM_SUSPEND, 0, 0);
+		if (!ret)
+			atomic_inc(&vfio_pm_notifies);
+	}
+	return ret;
+}
+	
 /*
  * Notify user level drivers of hibernation/suspend request
  * Send all the notifies in parallel, collect all the replies
@@ -710,50 +720,44 @@ static DECLARE_WAIT_QUEUE_HEAD(vfio_pm_wait_q);
  */
 static int vfio_pm_suspend(void)
 {
-	struct vfio_dev *vdev;
-	int id, alive = 0;
+	int ret;
 
 	mutex_lock(&vfio_minor_lock);
-	atomic_set(&vfio_pm_suspend_count, 0);
+
+	atomic_set(&vfio_pm_notifies, 0);
 	vfio_pm_suspend_result = NOTIFY_DONE;
-	for (id = 0; id <= vfio_max_minor; id++) {
-		vdev = idr_find(&vfio_idr, id);
-		if (!vdev)
-			continue;
-		if (vdev->refcnt == 0)
-			continue;
-		alive++;
-		if (vfio_nl_upcall(vdev, VFIO_MSG_PM_SUSPEND, 0, 0) == 0)
-			atomic_inc(&vfio_pm_suspend_count);
-	}
+
+	ret = idr_for_each(&vfio_idr, vfio_nl_pm_suspend_notify, NULL);
+
 	mutex_unlock(&vfio_minor_lock);
-	if (alive > atomic_read(&vfio_pm_suspend_count))
+
+	if (ret)
 		return NOTIFY_BAD;
 
 	/* sleep for reply */
 	if (wait_event_interruptible_timeout(vfio_pm_wait_q,
-	    (atomic_read(&vfio_pm_suspend_count) == 0),
-	    VFIO_SUSPEND_REPLY_TIMEOUT) <= 0) {
+				(atomic_read(&vfio_pm_notifies) == 0),
+				VFIO_SUSPEND_REPLY_TIMEOUT) <= 0) {
 		printk(KERN_ERR "vfio upcall suspend reply timeout\n");
 		return NOTIFY_BAD;
 	}
 	return vfio_pm_suspend_result;
 }
 
+static int vfio_nl_pm_resume_notify(int id, void *p, void *data)
+{
+	struct vfio_dev *vdev = p;
+
+	if (vdev->refcnt)
+		vfio_nl_upcall(vdev, VFIO_MSG_PM_RESUME, 0, 0);
+
+	return 0;
+}
+	
 static int vfio_pm_resume(void)
 {
-	struct vfio_dev *vdev;
-	int id;
-
 	mutex_lock(&vfio_minor_lock);
-	for (id = 0; id <= vfio_max_minor; id++) {
-		vdev = idr_find(&vfio_idr, id);
-		if (!vdev)
-			continue;
-		if (vdev->refcnt == 0)
-			continue;
-		vfio_nl_upcall(vdev, VFIO_MSG_PM_RESUME, 0, 0);
-	}
+	idr_for_each(&vfio_idr, vfio_nl_pm_resume_notify, NULL);
 	mutex_unlock(&vfio_minor_lock);
 	return NOTIFY_DONE;
 }
@@ -765,7 +769,7 @@ void vfio_pm_process_reply(int reply)
 		if (reply != NOTIFY_DONE)
 			vfio_pm_suspend_result = NOTIFY_BAD;
 	}
-	if (atomic_dec_and_test(&vfio_pm_suspend_count))
+	if (atomic_dec_and_test(&vfio_pm_notifies))
 		wake_up(&vfio_pm_wait_q);
 }
 
@@ -790,7 +794,6 @@ static struct notifier_block vfio_pm_nb = {
 	.notifier_call = vfio_pm_notify,
 };
 
-
 static void __exit cleanup(void)
 {
 	if (vfio_major >= 0)
@@ -802,6 +805,7 @@ static void __exit cleanup(void)
 	vfio_nl_exit();
 	vfio_class_destroy();
 	vfio_uninit_pci_perm_bits();
+	idr_destroy(&vfio_idr);
 }
 
 static int __init init(void)
