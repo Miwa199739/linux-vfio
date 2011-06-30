@@ -37,9 +37,6 @@
 #include <net/genetlink.h>
 #include <linux/vfio.h>
 
-static u32 vfio_seq_num;
-static DEFINE_SPINLOCK(vfio_seq_lock);
-
 static struct genl_family vfio_nl_family = {
 	.id		= GENL_ID_GENERATE,
 	.hdrsize	= 0,
@@ -51,17 +48,15 @@ static struct genl_family vfio_nl_family = {
 /* Requests to userspace */
 static struct sk_buff *vfio_nl_create(u8 req)
 {
+	static atomic_t seq;
 	void *hdr;
 	struct sk_buff *msg = nlmsg_new(NLMSG_GOODSIZE, GFP_ATOMIC);
-	unsigned long f;
 
 	if (!msg)
 		return NULL;
 
-	spin_lock_irqsave(&vfio_seq_lock, f);
-	hdr = genlmsg_put(msg, 0, ++vfio_seq_num,
-			&vfio_nl_family, 0, req);
-	spin_unlock_irqrestore(&vfio_seq_lock, f);
+	hdr = genlmsg_put(msg, 0, atomic_add_return(1, &seq),
+			  &vfio_nl_family, 0, req);
 	if (!hdr) {
 		nlmsg_free(msg);
 		return NULL;
