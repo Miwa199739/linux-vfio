@@ -21,6 +21,7 @@
  */
 struct uiommu_domain {
 	struct iommu_domain	*domain;
+	struct file		*file;
 	atomic_t		refcnt;
 };
 

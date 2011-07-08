@@ -61,6 +61,7 @@ static int uiommu_open(struct inode *inode, struct file *file)
 	if (!udomain)
 		return -ENOMEM;
 	file->private_data = udomain;
+	udomain->file = file;
 	return 0;
 }
 
@@ -93,11 +94,11 @@ struct uiommu_domain *uiommu_fdget(int fd)
 	file = fget(fd);
 	if (!file)
 		return ERR_PTR(-EBADF);
-	if (file->f_op != &uiommu_fops) {
+	udomain = file->private_data;
+	if (file->f_op != &uiommu_fops || udomain->file != file) {
 		fput(file);
 		return ERR_PTR(-EINVAL);
 	}
-	udomain = file->private_data;
 	atomic_inc(&udomain->refcnt);
 	return udomain;
 }
@@ -105,6 +106,7 @@ EXPORT_SYMBOL_GPL(uiommu_fdget);
 
 void uiommu_put(struct uiommu_domain *udomain)
 {
+	fput(udomain->file);
 	if (atomic_dec_and_test(&udomain->refcnt)) {
 		iommu_domain_free(udomain->domain);
 		kfree(udomain);
