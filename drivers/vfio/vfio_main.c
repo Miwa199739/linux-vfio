@@ -374,6 +374,8 @@ static long vfio_unl_ioctl(struct file *filep,
 		if (copy_from_user(&dm, uarg, sizeof dm))
 			return -EFAULT;
 		ret = vfio_dma_unmap_dm(vdev->uiommu, &dm);
+		if (!ret && copy_to_user(uarg, &dm, sizeof dm))
+			ret = -EFAULT;
 		break;
 
 	case VFIO_SET_IRQ_EVENTFD:

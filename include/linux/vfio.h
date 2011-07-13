@@ -189,7 +189,7 @@ struct vfio_dma_map {
 #define	VFIO_MAP_DMA			_IOWR(';', 101, struct vfio_dma_map)
 
 /* Unmap user pages */
-#define	VFIO_UNMAP_DMA			_IOW(';', 102, struct vfio_dma_map)
+#define	VFIO_UNMAP_DMA			_IOWR(';', 102, struct vfio_dma_map)
 
 /* Request IRQ interrupts; use given eventfd to signal userspace.
  * Use fd < 0 to release IRQ.  Mutually exclusive with MSI enabled */
