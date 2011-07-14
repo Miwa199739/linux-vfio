@@ -181,7 +181,7 @@ struct vfio_dma_map {
 	__u64	dmaaddr;	/* desired and/or returned dma address */
 	__u64	size;		/* size in bytes */
 #define	VFIO_MAX_MAP_SIZE	(1LL<<30) /* 1G, must be < (PAGE_SIZE<<32) */
-	__u64	flags;		/* bool: 0 for r/o; 1 for r/w */
+	__u64	flags;
 #define	VFIO_FLAG_WRITE		0x1	/* req writeable DMA mem */
 };
 

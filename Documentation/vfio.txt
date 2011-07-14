@@ -3,15 +3,20 @@ The VFIO "driver" is used to allow privileged AND non-privileged processes to
 implement user-level device drivers for any well-behaved PCI, PCI-X, and PCIe
 devices.
 
-Why is this interesting?  Some applications, especially in the high performance
-computing field, need access to hardware functions with as little overhead as
-possible. Examples are in network adapters (typically non TCP/IP based) and
-in compute accelerators - i.e., array processors, FPGA processors, etc.
-Previous to the VFIO drivers these apps would need either a kernel-level
-driver (with corresponding overheads), or else root permissions to directly
-access the hardware. The VFIO driver allows generic access to the hardware
-from non-privileged apps IF the hardware is "well-behaved" enough for this
-to be safe.
+Why is this interesting?  Virtual machines are often configured with direct
+access to PCI devices to reduce latency, provie high-speed I/O, or simply
+because no paravirtualized or emulated model exists for the type of device.
+In this mode, the entire virtual guest machine becomes a user-level driver,
+needing a safe, secure, high performance interface directly to the underlying
+device.  VFIO provides that interface.  Additionally, some applications,
+especially in the high performance computing field, need access to hardware
+functions with as little overhead as possible. Examples are in network
+adapters (typically non TCP/IP based) and in compute accelerators - i.e.,
+array processors, FPGA processors, etc.  Previous to the VFIO drivers these
+apps would need either a kernel-level driver (with corresponding overheads),
+or else root permissions to directly access the hardware. The VFIO driver
+allows generic access to the hardware from non-privileged apps IF the
+hardware is "well-behaved" enough for this to be safe.
 
 While there have long been ways to implement user-level drivers using specific
 corresponding drivers in the kernel, it was not until the introduction of the
@@ -22,18 +27,19 @@ drivers had to be trusted - they could do dangerous manipulation of DMA
 addreses and were required to be root to write PCI configuration space
 registers.
 
-Recent hardware technologies - I/O MMUs and PCI I/O Virtualization - provide
+Recent hardware technologies - IOMMUs and PCI I/O Virtualization - provide
 new hardware capabilities which the VFIO solution exploits to allow non-root
 user level drivers. The main role of the IOMMU is to ensure that DMA accesses
 from devices go only to the appropriate memory locations; this allows VFIO to
 ensure that user level drivers do not corrupt inappropriate memory.  PCI I/O
-virtualization (SR-IOV) was defined to allow "pass-through" of virtual devices
-to guest virtual machines. VFIO in essence implements pass-through of devices
-to user processes, not virtual machines.  SR-IOV devices implement a
-traditional PCI device (the physical function) and a dynamic number of special
-PCI devices (virtual functions) whose feature set is somewhat restricted - in
-order to allow the operating system or virtual machine monitor to ensure the
-safe operation of the system.
+virtualization (SR-IOV) was defined to facilitate "pass-through" of virtual
+devices to guest virtual machines. VFIO in essence implements a channel which
+allows pass-through of devices to user processes, which can then provide
+interfaces to expose the device to virtual machines.  SR-IOV devices implement
+a traditional PCI device (the physical function) and a dynamic number of
+special PCI devices (virtual functions) whose feature set is somewhat
+restricted - in order to allow the operating system or virtual machine monitor
+to ensure the safe operation of the system.
 
 Any SR-IOV virtual function meets the VFIO definition of "well-behaved", but
 there are many other non-IOV PCI devices which also meet the defintion.
@@ -42,8 +48,9 @@ Elements of this definition are:
   a multiple of the system page size.
 - If MSI-X interrupts are used, the device driver must not attempt to mmap or
   write the MSI-X vector area.
-- If the device is a PCI device (not PCI-X or PCIe), it must conform to PCI
-  revision 2.3 to allow its interrupts to be masked in a generic way.
+- If the device is a PCI device (not PCI-X or PCIe), it must either make use
+  of an exclusive interrupt on the host or conform to PCI revision 2.3 to
+  allow its interrupts to be masked in a generic way.
 - The device must not use the PCI configuration space in any non-standard way,
   i.e., the user level driver will be permitted only to read and write standard
   fields of the PCI config space, and only if those fields cannot cause harm to
@@ -51,13 +58,14 @@ Elements of this definition are:
   driver can read/write them like a kernel driver, but they do not affect the
   real device.
 
-Only a very few platforms today (Intel X7500 is one) fully support both DMA
-remapping and interrupt remapping in the IOMMU.  Everyone has DMA remapping
-but interrupt remapping is missing in some Intel hardware and software, and
-it is missing in the AMD IOMMU software. Interrupt remapping is needed to
-protect a user level driver from triggering interrupts for other devices in
-the system.  Until interrupt remapping is in more platforms we allow the
-admin to load the module with allow_unsafe_intrs=1 which will make this driver useful (but not safe) on those platforms.
+Typically only server platforms fully support both DMA remapping and interrupt
+remapping in the IOMMU.  Everyone has DMA remapping but interrupt remapping is
+missing in some Intel hardware (VT-d1) and it is missing in the AMD IOMMU
+software. Interrupt remapping is needed to protect a user level driver from
+triggering interrupts for other devices in the system.  Until interrupt
+remapping is in more platforms we allow the admin to load the module with
+allow_unsafe_intrs=1 which will make this driver useful (but not safe) on
+those platforms.
 
 When the vfio module is loaded, it will have access to no devices until the
 desired PCI devices are "bound" to the driver.  First, make sure the devices
@@ -104,20 +112,23 @@ notification file descriptors created by the eventfd system call. The user
 program must create one or more event descriptors and pass them to the vfio
 driver via ioctls to arrange for the interrupt mapping:
 1.
-	efd = eventfd(0, 0);
-	ioctl(vfio_fd, VFIO_EVENTFD_IRQ, &efd);
+	int fd = eventfd(0, 0);
+	ioctl(vfio_fd, VFIO_SET_IRQ_EVENTFD, &fd);
 		This provides an eventfd for traditional IRQ interrupts.
 		IRQs will be disabled after each interrupt until the driver
-		re-enables them via the PCI COMMAND register.
+		re-enables them via the VFIO_UNMASK_IRQ ioctl (or triggers
+		the the same via VFIO_SET_UNMASK_IRQ_EVENTFD setup).
 2.
-	efd = eventfd(0, 0);
-	ioctl(vfio_fd, VFIO_EVENTFD_MSI, &efd);
-		This connects MSI interrupts to an eventfd.
+ 	int fds[N+1];
+	fds[0] = N;
+	fds[1..N] = eventfd(0, 0);
+	ioctl(vfio_fd, VFIO_SET_MSI_EVENTFDS, fds);
+		This connects N MSI interrupts with N eventfds.
 3.
- 	int arg[N+1];
-	arg[0] = N;
-	arg[1..N] = eventfd(0, 0);
-	ioctl(vfio_fd, VFIO_EVENTFDS_MSIX, arg);
+ 	int fds[N+1];
+	fds[0] = N;
+	fds[1..N] = eventfd(0, 0);
+	ioctl(vfio_fd, VFIO_SET_MSIX_EVENTFDS, fds);
 		This connects N MSI-X interrupts with N eventfds.
 
 Waiting and checking for interrupts is done by the user program by reads,
@@ -138,45 +149,47 @@ of a single large buffer, and then allocate the smaller buffers from the
 large one.
 
 The DMA buffers are locked into physical memory for the duration of their
-existence - until VFIO_DMA_UNMAP is called, until the user pages are
-unmapped from the user process, or until the vfio file descriptor is closed.
-The user process must have permission to lock the pages given by the ulimit(-l)
-command, which in turn relies on settings in the /etc/security/limits.conf
-file.
+existence - until VFIO_UNMAP_DMA is called or until the vfio file descriptor
+is closed.  The user process must have permission to lock the pages given by
+the ulimit(-l) command, which in turn relies on settings in the
+/etc/security/limits.conf file.
 
 The vfio_dma_map structure is used as an argument to the ioctls which
-do the DMA mapping. Its vaddr, dmaaddr, and size fields must always be a
-multiple of a page. Its rdwr field is zero for read-only (outbound), and
-non-zero for read/write buffers.
+do the DMA mapping and unmappings. Its vaddr, dmaaddr, and size fields must
+always be a multiple of a page.  Its VFIO_FLAG_WRITE flag field is clear for
+read-only (outbound), and non-zero for read/write buffers.
 
 	struct vfio_dma_map {
 		__u64	vaddr;	  /* process virtual addr */
 		__u64	dmaaddr;  /* desired and/or returned dma address */
 		__u64	size;	  /* size in bytes */
-		int	rdwr;	  /* bool: 0 for r/o; 1 for r/w */
+		__u64	flags;
+#define VFIO_FLAG_WRITE         0x1     /* req writeable DMA mem */
 	};
 
-The VFIO_DMA_MAP_IOVA is called with a vfio_dma_map structure with the
+The VFIO_MAP_DMA is called with a vfio_dma_map structure with the
 dmaaddr field already assigned. The system will attempt to map the DMA
 buffer into the IO space at the given dmaaddr. This is expected to be
 useful if KVM or other virtualization facilities use this driver.
-Use of VFIO_DMA_MAP_IOVA requires an explicit assignment of the device
+Use of VFIO_MAP_DMA requires an explicit assignment of the device
 to an IOMMU domain.  A file descriptor for an empty IOMMU domain is
 acquired by opening /dev/uiommu.  The device is then attached to the
-domain by issuing a VFIO_DOMAIN_SET ioctl with the domain fd address as
-the argument.  The device may be detached from the domain with the
-VFIO_DOMAIN_UNSET ioctl (no argument).  It is expected that hypervisors
-may wish to attach many devices to the same domain.
+domain by issuing a VFIO_SET_DOMAIN ioctl with the domain fd address as
+the argument.  The device may be detached from the domain by again
+calling VFIO_SET_DOMAIN with a -1 file descriptor.  It is expected that
+hypervisors may wish to attach many devices to the same domain.
 
-The VFIO_DMA_UNMAP takes a fully filled vfio_dma_map structure and unmaps
-the buffer and releases the corresponding system resources.
-
-The VFIO_DMA_MASK ioctl is used to set the maximum permissible DMA address
-(device dependent). It takes a single unsigned 64 bit integer as an argument.
-This call also has the side effect of enabling PCI bus mastership.
+The VFIO_UNMAP_DMA takes a fully filled vfio_dma_map structure and unmaps
+the buffer and releases the corresponding system resources.  The actual
+range unmapped is returned in the same structure.
 
 Miscellaneous:
 
-The VFIO_BAR_LEN ioctl provides an easy way to determine the size of a PCI
-device's base address region. It is passed a single integer specifying which
+The VFIO_GET_BAR_LEN ioctl provides an easy way to determine the size of a PCI
+device's base address region. It is passed a single size_t specifying which
 BAR (0-5 or 6 for ROM bar), and passes back the length in the same field.
+
+The VFIO_RESET_FUNCTION ioctl provides a way for userspace to request a
+reset of the PCI device.  The calls pci_reset_function, which will attempt
+and FLR reset, PM reset, or bus reset, depending on what the hardware and
+bus topology supports.
