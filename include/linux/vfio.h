@@ -204,7 +204,7 @@ struct vfio_dma_map {
 #define	VFIO_SET_MSIX_EVENTFDS		_IOW(';', 105, int)
 
 /* Get length of a BAR */
-#define	VFIO_GET_BAR_LEN		_IOWR(';', 106, size_t)
+#define	VFIO_GET_BAR_LEN		_IOWR(';', 106, __u64)
 
 /* Set the IOMMU domain - arg is fd from uiommu driver, fd < 0 to unset */
 #define	VFIO_SET_DOMAIN			_IOW(';', 107, int)
@@ -230,7 +230,14 @@ struct vfio_dma_map {
 #define	VFIO_PCI_BAR5_RESOURCE		0x5
 #define	VFIO_PCI_ROM_RESOURCE		0x6
 #define	VFIO_PCI_CONFIG_RESOURCE	0xF
-#define	VFIO_PCI_SPACE_SHIFT		48
+/*
+ * On ILP32 systems vm_pgoff is 32bits.  This makes vm_pgoff << PAGE_SHIFT
+ * a minimum of 44 bits across architectures.  Use the top 4 bits to segment
+ * the resources into the above regions, leaving us with 40 bits (1TB) of
+ * address space within each.
+ */
+#define	VFIO_PCI_SPACE_SHIFT		40
+
 #define VFIO_PCI_CONFIG_OFF vfio_pci_space_to_offset(VFIO_PCI_CONFIG_RESOURCE)
 
 static inline int vfio_offset_to_pci_space(__u64 off)
