@@ -457,7 +457,7 @@ igate_unlock:
 			return -EFAULT;
 		break;
 
-	case VFIO_SET_DOMAIN:
+	case VFIO_SET_UIOMMU_DOMAIN:
 		if (get_user(fd, intargp))
 			return -EFAULT;
 		if (fd >= 0)

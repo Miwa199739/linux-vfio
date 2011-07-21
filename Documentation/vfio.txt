@@ -174,10 +174,10 @@ useful if KVM or other virtualization facilities use this driver.
 Use of VFIO_MAP_DMA requires an explicit assignment of the device
 to an IOMMU domain.  A file descriptor for an empty IOMMU domain is
 acquired by opening /dev/uiommu.  The device is then attached to the
-domain by issuing a VFIO_SET_DOMAIN ioctl with the domain fd address as
-the argument.  The device may be detached from the domain by again
-calling VFIO_SET_DOMAIN with a -1 file descriptor.  It is expected that
-hypervisors may wish to attach many devices to the same domain.
+domain by issuing a VFIO_SET_UIOMMU_DOMAIN ioctl with the domain fd
+address as the argument.  The device may be detached from the domain by
+again calling VFIO_SET_UIOMMU_DOMAIN with a -1 file descriptor.  It is
+expected that hypervisors may wish to attach many devices to the same domain.
 
 The VFIO_UNMAP_DMA takes a fully filled vfio_dma_map structure and unmaps
 the buffer and releases the corresponding system resources.  The actual

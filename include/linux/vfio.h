@@ -185,7 +185,10 @@ struct vfio_dma_map {
 #define	VFIO_FLAG_WRITE		0x1	/* req writeable DMA mem */
 };
 
-/* Map user pages at specific dma address.  Requires previous VFIO_DOMAIN_SET */
+/*
+ * Map user pages at specific dma address.
+ * Requires previous VFIO_SET_UIOMMU_DOMAIN
+ */
 #define	VFIO_MAP_DMA			_IOWR(';', 101, struct vfio_dma_map)
 
 /* Unmap user pages */
@@ -207,7 +210,7 @@ struct vfio_dma_map {
 #define	VFIO_GET_BAR_LEN		_IOWR(';', 106, __u64)
 
 /* Set the IOMMU domain - arg is fd from uiommu driver, fd < 0 to unset */
-#define	VFIO_SET_DOMAIN			_IOW(';', 107, int)
+#define	VFIO_SET_UIOMMU_DOMAIN		_IOW(';', 107, int)
 
 /* Re-enable INTx */
 #define	VFIO_UNMASK_IRQ			_IO(';', 108)
