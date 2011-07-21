@@ -245,7 +245,7 @@ static int vfio_dma_map(struct vfio_uiommu *uiommu, unsigned long iova,
 			locked++;
 
 		ret = uiommu_map(uiommu->udomain, iova,
-				 pfn << PAGE_SHIFT, 0, prot);
+				 (phys_addr_t)pfn << PAGE_SHIFT, 0, prot);
 		if (ret) {
 			/* Back out mappings on error */
 			put_pfn(pfn, rdwr);
