@@ -935,7 +935,7 @@ static int vfio_config_rwbyte(int write,
 {
 	u8 *map = vdev->pci_config_map;
 	u8 cap, val, newval;
-	u16 start, off;
+	u16 start = 0, off;
 	int p, bottom;
 	struct perm_bits *perm;
 	u8 wr, virt;

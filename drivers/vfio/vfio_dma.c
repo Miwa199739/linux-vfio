@@ -152,9 +152,10 @@ static int __vfio_dma_unmap(struct vfio_uiommu *uiommu, unsigned long iova,
 		unsigned long pfn;
 
 		pfn = uiommu_iova_to_phys(uiommu->udomain, iova) >> PAGE_SHIFT;
-		uiommu_unmap(uiommu->udomain, iova, 0);
-
-		unlocked += put_pfn(pfn, rdwr);
+		if (pfn) {
+			uiommu_unmap(uiommu->udomain, iova, 0);
+			unlocked += put_pfn(pfn, rdwr);
+		}
 	}
 	return unlocked;
 }
@@ -232,7 +233,7 @@ static int vfio_dma_map(struct vfio_uiommu *uiommu, unsigned long iova,
 		prot |= IOMMU_CACHE;
 
 	for (i = 0; i < npage; i++, iova += PAGE_SIZE, vaddr += PAGE_SIZE) {
-		unsigned long pfn;
+		unsigned long pfn = 0;
 
 		ret = vaddr_get_pfn(vaddr, rdwr, &pfn);
 		if (ret) {
